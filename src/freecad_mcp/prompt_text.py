@@ -1,40 +1,84 @@
 ASSET_CREATION_STRATEGY = """
 Asset Creation Strategy for FreeCAD MCP
 
-When creating content in FreeCAD, always follow these steps:
+Units: lengths are millimeters, angles are degrees.
 
-0. Before starting any task, always use get_objects() to confirm the current state of the document.
+1. Orient first: get_objects(doc_name, detail="summary") shows every object's
+   type, shape validity, Volume, and BoundBox cheaply. Use detail="full" or
+   get_object only when you need full properties.
 
-1. Utilize the parts library:
-   - Check available parts using get_parts_list().
-   - If the required part exists in the library, use insert_part_from_library() to insert it into your document.
+2. Use the names FreeCAD actually assigned. create_document/create_object
+   return the real name (spaces become underscores, duplicates get numeric
+   suffixes like Box001) — always use the returned name in subsequent calls.
 
-2. If the appropriate asset is not available in the parts library:
-   - Create basic shapes (e.g., cubes, cylinders, spheres) using create_object().
-   - Adjust and define detailed properties of the shapes as necessary using edit_object().
+3. Prefer one idempotent execute_code script over long chains of
+   create_object/edit_object/get_object calls. A script that deletes and
+   recreates its own objects can be fixed and re-run in a single call. For
+   scripts you iterate on, write them to a file and use execute_code_from_file.
+   State persists between calls, so define helpers once and reuse them.
 
-3. Always assign clear and descriptive names to objects when adding them to the document.
+4. Check the parts library (get_parts_list / insert_part_from_library) before
+   modeling standard parts from scratch.
 
-4. Explicitly set the position, scale, and rotation properties of created or inserted objects using edit_object() to ensure proper spatial relationships.
+5. Verify numerically, not just visually:
+   - get_object / get_objects report BoundBox, Volume, and CenterOfMass —
+     confirm "is this actually 50 mm tall?" from data, not pixels.
+   - measure_distance checks clearances and interference (distance 0 +
+     intersection volume = parts collide).
+   - get_topology names each face (Face1, Face2, ...) with its type, area,
+     centroid, and normal — use it for FEM References instead of guessing.
+   - Watch for WARNING lines about objects that did not recompute cleanly,
+     and check get_report_log when something misbehaves.
 
-5. After editing an object, always verify that the set properties have been correctly applied by using get_object().
+6. Manage screenshot feedback to save tokens. Tools that modify or inspect the
+   model accept include_screenshot and view_name parameters:
+   - Pass include_screenshot=False for intermediate steps and analytical
+     scripts; confirm visually once at the end with get_view.
+   - Pass view_name ("Front", "Top", "Right", ...) to orient the screenshot
+     toward what you changed; default is "Isometric" (top-front-right).
+   - Screenshots default to at most 800 px on the longest edge; pass explicit
+     width/height to get_view for full resolution.
 
-6. If detailed customization or specialized operations are necessary, use execute_code() to run custom Python scripts.
-   For long scripts that will be modified and re-run, write the script to a file and use execute_code_from_file() so the file can be edited selectively instead of resending the entire script.
+7. Finish the job: documents live only in memory until save_document; use
+   export_document for STEP/STL/3MF deliverables.
+"""
 
-7. Manage screenshot feedback to save tokens. Tools that modify or inspect the
-   model accept optional `include_screenshot` and `view_name` parameters:
-   - Pass include_screenshot=False when the image would not be informative:
-     analytical or computational scripts whose result is printed output,
-     bulk property edits, or intermediate steps in a longer sequence of
-     changes where only the final state needs visual confirmation.
-   - Pass view_name (e.g. "Front", "Top", "Right") to orient the screenshot
-     toward the part of the model you changed; the default is "Isometric" (top-front-right).
-   - When you skipped screenshots during intermediate steps, use get_view()
-     afterwards to visually inspect the result from the most informative angle.
 
-Only revert to basic creation methods in the following cases:
-- When the required asset is not available in the parts library.
-- When a basic shape is explicitly requested.
-- When creating complex shapes requires custom scripting.
+FEM_WORKFLOW_GUIDE = """
+FEM workflow with the FreeCAD MCP tools
+
+A complete static analysis needs, in order (all via create_object unless noted):
+
+1. Geometry: any Part-derived solid (e.g. Part::Box, PartDesign::Body).
+
+2. Analysis container — obj_type "Fem::AnalysisPython":
+{"doc_name": "Doc", "obj_name": "FemAnalysis", "obj_type": "Fem::AnalysisPython"}
+
+3. Material — obj_type "Fem::MaterialCommon", attached via analysis_name:
+{"doc_name": "Doc", "obj_name": "Material", "obj_type": "Fem::MaterialCommon",
+ "analysis_name": "FemAnalysis",
+ "obj_properties": {"Material": {"Name": "Steel", "Density": "7900 kg/m^3",
+                    "YoungModulus": "210 GPa", "PoissonRatio": 0.3}}}
+
+4. Constraints — e.g. "Fem::ConstraintFixed" / "Fem::ConstraintForce" /
+   "Fem::ConstraintPressure". References name an object and a face; get face
+   names from get_topology (face centroids/normals tell you which is which):
+{"doc_name": "Doc", "obj_name": "Fixed", "obj_type": "Fem::ConstraintFixed",
+ "analysis_name": "FemAnalysis",
+ "obj_properties": {"References": [{"object_name": "Box", "face": "Face1"}]}}
+Force constraints also take e.g. "Force": 1000 (N) and "Direction" references.
+
+5. Mesh — obj_type "Fem::FemMeshGmsh" (Gmsh runs automatically on creation).
+   "Shape" names the geometry object (legacy "Part" also accepted). On
+   FreeCAD 1.x the size limits are CharacteristicLengthMax/Min (legacy
+   ElementSizeMax/Min also accepted):
+{"doc_name": "Doc", "obj_name": "Mesh", "obj_type": "Fem::FemMeshGmsh",
+ "analysis_name": "FemAnalysis",
+ "obj_properties": {"Shape": "Box", "CharacteristicLengthMax": 10,
+                    "CharacteristicLengthMin": 0.1}}
+
+6. Solve with run_fem_analysis(doc_name, analysis_name). A SolverCcxTools is
+   auto-created if missing. Returns max von Mises stress (MPa), max/min
+   displacement (mm), and node count. The solver blocks all other RPC calls
+   while running; do not issue parallel requests.
 """

@@ -29,7 +29,7 @@ from .operations import (
     run_fem_analysis_operation,
     save_document_operation,
 )
-from .prompt_text import ASSET_CREATION_STRATEGY
+from .prompt_text import ASSET_CREATION_STRATEGY, FEM_WORKFLOW_GUIDE
 from .server_state import ServerState
 
 
@@ -69,7 +69,25 @@ async def server_lifespan(server: FastMCP) -> AsyncIterator[Dict[str, Any]]:
 
 mcp = FastMCP(
     "FreeCADMCP",
-    instructions="FreeCAD integration through the Model Context Protocol",
+    instructions=(
+        "Control a live FreeCAD instance: create/edit/inspect documents and objects, "
+        "run Python inside FreeCAD, measure geometry, run FEM, save/export files.\n"
+        "- Units: lengths are millimeters, angles are degrees.\n"
+        "- FreeCAD sanitizes requested names (spaces become underscores, duplicates "
+        "get numeric suffixes). Always use the actual name returned by "
+        "create_document/create_object in subsequent calls.\n"
+        "- PartDesign::* and Sketcher::* objects made via create_object are empty "
+        "shells; build features and sketch geometry with execute_code.\n"
+        "- execute_code state persists across calls (FreeCAD/App/FreeCADGui/Gui are "
+        "pre-imported); prefer one idempotent script over many small tool calls.\n"
+        "- Verify dimensions numerically with get_object (BoundBox/Volume/"
+        "CenterOfMass), measure_distance, and get_topology — not screenshots alone.\n"
+        "- Documents live only in memory until save_document; export_document "
+        "writes STEP/STL/3MF etc.\n"
+        "- FreeCAD's console output (recompute errors, async job output) is "
+        "readable via get_report_log.\n"
+        "- FEM recipes: read the freecad://fem-workflow resource."
+    ),
     lifespan=server_lifespan,
 )
 
@@ -115,18 +133,28 @@ def create_object(
     obj_type: str,
     obj_name: str,
     analysis_name: str | None = None,
-    obj_properties: dict[str, Any] = None,
+    obj_properties: dict[str, Any] | None = None,
     include_screenshot: bool = True,
     view_name: ViewName = "Isometric",
 ) -> list[TextContent | ImageContent]:
-    """Create a new object in FreeCAD.
-    Object type is starts with "Part::" or "Draft::" or "PartDesign::" or "Fem::".
+    """Create a new object in FreeCAD. Lengths in mm, angles in degrees.
+
+    The response reports the name FreeCAD actually assigned (requested names
+    are sanitized and deduplicated) — use that name in subsequent calls.
+
+    Note: PartDesign::* and Sketcher::* objects are created as empty shells;
+    add features/sketch geometry with execute_code afterwards. For FEM objects
+    (Fem::AnalysisPython, materials, constraints, meshes) read the
+    freecad://fem-workflow resource for complete recipes.
 
     Args:
         doc_name: The name of the document to create the object in.
-        obj_type: The type of the object to create (e.g. 'Part::Box', 'Part::Cylinder', 'Draft::Circle', 'PartDesign::Body', etc.).
-        obj_name: The name of the object to create.
-        obj_properties: The properties of the object to create.
+        obj_type: The type of the object to create (e.g. 'Part::Box',
+            'Part::Cylinder', 'Draft::Circle', 'PartDesign::Body', 'Fem::*').
+        obj_name: The requested name of the object.
+        analysis_name: For Fem::* objects only: the Fem::AnalysisPython
+            container to add the new object to (required for Fem::FemMeshGmsh).
+        obj_properties: Properties to set on the new object.
         include_screenshot: Whether to return a screenshot of the model (default True).
             Set to False to save tokens when visual feedback is not needed,
             e.g. for intermediate steps in a longer sequence of changes.
@@ -134,108 +162,23 @@ def create_object(
             Pick the view that best shows the change being made.
 
     Returns:
-        A message indicating the success or failure of the object creation and a screenshot of the object.
+        The created object's actual name (with a warning if it did not
+        recompute cleanly) and a screenshot of the model.
 
-    Examples:
-        If you want to create a cylinder with a height of 30 and a radius of 10, you can use the following data.
+    Example — a rotated cylinder at (10, 10, 0):
         ```json
         {
-            "doc_name": "MyCylinder",
+            "doc_name": "MyDoc",
             "obj_name": "Cylinder",
             "obj_type": "Part::Cylinder",
             "obj_properties": {
                 "Height": 30,
                 "Radius": 10,
                 "Placement": {
-                    "Base": {
-                        "x": 10,
-                        "y": 10,
-                        "z": 0
-                    },
-                    "Rotation": {
-                        "Axis": {
-                            "x": 0,
-                            "y": 0,
-                            "z": 1
-                        },
-                        "Angle": 45
-                    }
+                    "Base": {"x": 10, "y": 10, "z": 0},
+                    "Rotation": {"Axis": {"x": 0, "y": 0, "z": 1}, "Angle": 45}
                 },
-                "ViewObject": {
-                    "ShapeColor": [0.5, 0.5, 0.5, 1.0]
-                }
-            }
-        }
-        ```
-
-        If you want to create a circle with a radius of 10, you can use the following data.
-        ```json
-        {
-            "doc_name": "MyCircle",
-            "obj_name": "Circle",
-            "obj_type": "Draft::Circle",
-        }
-        ```
-
-        If you want to create a FEM analysis, you can use the following data.
-        ```json
-        {
-            "doc_name": "MyFEMAnalysis",
-            "obj_name": "FemAnalysis",
-            "obj_type": "Fem::AnalysisPython",
-        }
-        ```
-
-        If you want to create a FEM constraint, you can use the following data.
-        ```json
-        {
-            "doc_name": "MyFEMConstraint",
-            "obj_name": "FemConstraint",
-            "obj_type": "Fem::ConstraintFixed",
-            "analysis_name": "MyFEMAnalysis",
-            "obj_properties": {
-                "References": [
-                    {
-                        "object_name": "MyObject",
-                        "face": "Face1"
-                    }
-                ]
-            }
-        }
-        ```
-
-        If you want to create a FEM mechanical material, you can use the following data.
-        ```json
-        {
-            "doc_name": "MyFEMAnalysis",
-            "obj_name": "FemMechanicalMaterial",
-            "obj_type": "Fem::MaterialCommon",
-            "analysis_name": "MyFEMAnalysis",
-            "obj_properties": {
-                "Material": {
-                    "Name": "MyMaterial",
-                    "Density": "7900 kg/m^3",
-                    "YoungModulus": "210 GPa",
-                    "PoissonRatio": 0.3
-                }
-            }
-        }
-        ```
-
-        If you want to create a FEM mesh, you can use the following data.
-        The `Shape` property is required (legacy `Part` is also accepted).
-        On FreeCAD 1.x the size limits are `CharacteristicLengthMax/Min`;
-        the legacy `ElementSizeMax/Min` keys are also accepted.
-        ```json
-        {
-            "doc_name": "MyFEMMesh",
-            "obj_name": "FemMesh",
-            "obj_type": "Fem::FemMeshGmsh",
-            "analysis_name": "MyFEMAnalysis",
-            "obj_properties": {
-                "Shape": "MyObject",
-                "CharacteristicLengthMax": 10,
-                "CharacteristicLengthMin": 0.1
+                "ViewObject": {"ShapeColor": [0.5, 0.5, 0.5, 1.0]}
             }
         }
         ```
@@ -767,7 +710,8 @@ def run_fem_analysis(
     - At least one Fem::ConstraintFixed and one Fem::ConstraintForce (or
       ConstraintPressure) bound to faces of the geometry, added to the analysis.
 
-    A SolverCcxTools is auto-created if the analysis has none.
+    A SolverCcxTools is auto-created if the analysis has none. See the
+    freecad://fem-workflow resource for complete setup recipes.
 
     The solver runs synchronously on the FreeCAD GUI thread and blocks all
     other RPC calls for its duration; do not fan out parallel requests.
@@ -799,6 +743,12 @@ def run_fem_analysis(
 @mcp.prompt()
 def asset_creation_strategy() -> str:
     return ASSET_CREATION_STRATEGY
+
+
+@mcp.resource("freecad://fem-workflow")
+def fem_workflow() -> str:
+    """Step-by-step FEM analysis recipes (analysis, material, constraints, mesh, solve)."""
+    return FEM_WORKFLOW_GUIDE
 
 
 def _validate_host(value: str) -> str:
