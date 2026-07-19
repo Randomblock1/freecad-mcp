@@ -328,6 +328,91 @@ def get_object_operation(
         return text_response(f"Failed to get object: {str(e)}")
 
 
+def measure_distance_operation(
+    freecad: FreeCADConnection,
+    doc_name: str,
+    object1: str,
+    object2: str,
+    sub1: str | None = None,
+    sub2: str | None = None,
+) -> ToolResponse:
+    try:
+        res = freecad.measure_distance(doc_name, object1, object2, sub1, sub2)
+        if res.get("success") is False:
+            return _lookup_error_response(res, "measure distance")
+        return json_response(res)
+    except Exception as e:
+        logger.error(f"Failed to measure distance: {str(e)}")
+        return text_response(f"Failed to measure distance: {str(e)}")
+
+
+def get_topology_operation(
+    freecad: FreeCADConnection,
+    doc_name: str,
+    obj_name: str,
+    include_edges: bool = False,
+) -> ToolResponse:
+    try:
+        res = freecad.get_topology(doc_name, obj_name, include_edges)
+        if res.get("success") is False:
+            return _lookup_error_response(res, "get topology")
+        return json_response(res)
+    except Exception as e:
+        logger.error(f"Failed to get topology: {str(e)}")
+        return text_response(f"Failed to get topology: {str(e)}")
+
+
+def save_document_operation(
+    freecad: FreeCADConnection,
+    doc_name: str,
+    file_path: str | None = None,
+) -> ToolResponse:
+    try:
+        res = freecad.save_document(doc_name, file_path)
+        if res.get("success") is False:
+            return _lookup_error_response(res, "save document")
+        return text_response(f"Document '{res['document_name']}' saved to {res['file_path']}")
+    except Exception as e:
+        logger.error(f"Failed to save document: {str(e)}")
+        return text_response(f"Failed to save document: {str(e)}")
+
+
+def export_document_operation(
+    freecad: FreeCADConnection,
+    doc_name: str,
+    file_path: str,
+    object_names: list[str] | None = None,
+) -> ToolResponse:
+    try:
+        res = freecad.export_document(doc_name, file_path, object_names)
+        if res.get("success") is False:
+            return _lookup_error_response(res, "export document")
+        return text_response(
+            f"Exported {res['exported_objects']} to {res['file_path']} "
+            f"({res['file_size_bytes']} bytes)"
+        )
+    except Exception as e:
+        logger.error(f"Failed to export document: {str(e)}")
+        return text_response(f"Failed to export document: {str(e)}")
+
+
+def get_report_log_operation(
+    freecad: FreeCADConnection,
+    tail: int = 100,
+) -> ToolResponse:
+    try:
+        res = freecad.get_report_log(tail)
+        if res.get("success") is False:
+            return _lookup_error_response(res, "get report log")
+        return text_response(
+            f"FreeCAD report log (last {res['returned_lines']} of "
+            f"{res['total_lines']} lines):\n{res['log']}"
+        )
+    except Exception as e:
+        logger.error(f"Failed to get report log: {str(e)}")
+        return text_response(f"Failed to get report log: {str(e)}")
+
+
 def get_parts_list_operation(freecad: FreeCADConnection) -> ToolResponse:
     try:
         parts = freecad.get_parts_list()

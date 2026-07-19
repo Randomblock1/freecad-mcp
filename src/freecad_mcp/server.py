@@ -14,15 +14,20 @@ from .operations import (
     execute_code_async_operation,
     execute_code_from_file_operation,
     execute_code_operation,
+    export_document_operation,
     get_async_status_operation,
     get_object_operation,
     get_objects_operation,
     get_parts_list_operation,
+    get_report_log_operation,
+    get_topology_operation,
     get_view_operation,
     insert_part_from_library_operation,
     list_documents_operation,
+    measure_distance_operation,
     reload_document_operation,
     run_fem_analysis_operation,
+    save_document_operation,
 )
 from .prompt_text import ASSET_CREATION_STRATEGY
 from .server_state import ServerState
@@ -573,6 +578,127 @@ def get_object(
         include_screenshot,
         view_name,
     )
+
+
+@mcp.tool()
+def measure_distance(
+    ctx: Context,
+    doc_name: str,
+    object1: str,
+    object2: str,
+    sub1: str | None = None,
+    sub2: str | None = None,
+) -> list[TextContent]:
+    """Measure the minimum distance between two objects (or sub-elements).
+
+    Use this to verify clearances and detect interference numerically instead
+    of eyeballing screenshots. Distances are in millimeters.
+
+    Args:
+        doc_name: The document containing both objects.
+        object1: Name of the first object.
+        object2: Name of the second object.
+        sub1: Optional sub-element of object1 (e.g. "Face3", "Edge1", "Vertex2");
+            get names from get_topology.
+        sub2: Optional sub-element of object2.
+
+    Returns:
+        distance_mm and the closest point on each shape. Distance 0 means the
+        shapes touch or overlap; for whole objects, intersection_volume_mm3 > 0
+        quantifies the actual interference.
+    """
+    return measure_distance_operation(
+        get_freecad_connection(), doc_name, object1, object2, sub1, sub2
+    )
+
+
+@mcp.tool()
+def get_topology(
+    ctx: Context,
+    doc_name: str,
+    obj_name: str,
+    include_edges: bool = False,
+) -> list[TextContent]:
+    """Get an object's topology: every face's type, area, centroid, and normal.
+
+    Face names ("Face1", "Face2", ...) are exactly the names FEM constraint
+    References and measure_distance sub-elements expect — use this instead of
+    guessing which face is which. Lengths in mm, areas in mm².
+
+    Args:
+        doc_name: The document containing the object.
+        obj_name: The object to interrogate.
+        include_edges: Also list edges (type, length, midpoint). Default False.
+
+    Returns:
+        Face/edge/vertex counts and a per-face breakdown (Name, surface Type
+        like Plane/Cylinder, Area, Centroid, Normal, Orientation). Truncated
+        at 200 entries with an explicit note.
+    """
+    return get_topology_operation(get_freecad_connection(), doc_name, obj_name, include_edges)
+
+
+@mcp.tool()
+def save_document(
+    ctx: Context,
+    doc_name: str,
+    file_path: str | None = None,
+) -> list[TextContent]:
+    """Save a document to disk (.FCStd). Documents live only in memory until saved.
+
+    Args:
+        doc_name: The document to save.
+        file_path: Where to save it (absolute path; "~" is expanded), required
+            the first time. Omit to re-save to the document's existing file.
+
+    Returns:
+        The saved file path, or an error if the document has never been saved
+        and no path was given.
+    """
+    return save_document_operation(get_freecad_connection(), doc_name, file_path)
+
+
+@mcp.tool()
+def export_document(
+    ctx: Context,
+    doc_name: str,
+    file_path: str,
+    object_names: list[str] | None = None,
+) -> list[TextContent]:
+    """Export objects to a CAD or mesh file; format chosen by file extension.
+
+    Supported: .step/.stp, .iges/.igs, .brep (exact CAD), .stl/.obj/.3mf/.ply/.amf
+    (tessellated mesh).
+
+    Args:
+        doc_name: The document to export from.
+        file_path: Destination path including extension (absolute; "~" expanded).
+        object_names: Objects to export. Omit to export all top-level objects
+            with geometry (a PartDesign Body exports once, not per-feature).
+
+    Returns:
+        The exported file path, size, and object list.
+    """
+    return export_document_operation(
+        get_freecad_connection(), doc_name, file_path, object_names
+    )
+
+
+@mcp.tool()
+def get_report_log(ctx: Context, tail: int = 100) -> list[TextContent]:
+    """Read FreeCAD's Report view console log (messages, warnings, errors).
+
+    This is where recompute errors, addon diagnostics, and async job output
+    land. Check it when something behaves unexpectedly or after background
+    jobs finish.
+
+    Args:
+        tail: Number of trailing lines to return (default 100).
+
+    Returns:
+        The last `tail` lines of the report log.
+    """
+    return get_report_log_operation(get_freecad_connection(), tail)
 
 
 @mcp.tool()

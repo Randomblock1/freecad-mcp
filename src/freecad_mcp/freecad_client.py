@@ -93,6 +93,35 @@ class FreeCADConnection:
     def get_object(self, doc_name: str, obj_name: str) -> dict[str, Any]:
         return self.server.get_object(doc_name, obj_name)
 
+    def measure_distance(
+        self,
+        doc_name: str,
+        object1: str,
+        object2: str,
+        sub1: str | None = None,
+        sub2: str | None = None,
+    ) -> dict[str, Any]:
+        return self.server.measure_distance(doc_name, object1, object2, sub1, sub2)
+
+    def get_topology(
+        self, doc_name: str, obj_name: str, include_edges: bool = False
+    ) -> dict[str, Any]:
+        return self.server.get_topology(doc_name, obj_name, include_edges)
+
+    def save_document(self, doc_name: str, file_path: str | None = None) -> dict[str, Any]:
+        return self.server.save_document(doc_name, file_path)
+
+    def export_document(
+        self,
+        doc_name: str,
+        file_path: str,
+        object_names: list[str] | None = None,
+    ) -> dict[str, Any]:
+        return self.server.export_document(doc_name, file_path, object_names)
+
+    def get_report_log(self, tail: int = 100) -> dict[str, Any]:
+        return self.server.get_report_log(tail)
+
     def get_parts_list(self) -> list[str]:
         return self.server.get_parts_list()
 

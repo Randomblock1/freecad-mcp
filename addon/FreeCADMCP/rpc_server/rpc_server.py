@@ -27,7 +27,11 @@ from rpc_server.gui_dispatch import (
     process_gui_tasks,
     request_shutdown,
 )
+from rpc_server.document_io import export_document as _export_document
+from rpc_server.document_io import save_document as _save_document
 from rpc_server.document_query import query_object, query_objects
+from rpc_server.geometry_tools import get_topology as _get_topology
+from rpc_server.geometry_tools import measure_distance as _measure_distance
 from rpc_server.ip_filter import FilteredXMLRPCServer, validate_allowed_ips
 from rpc_server.object_factory import create_object_gui, recompute_state_warning
 from rpc_server.parts_library import get_parts_list, insert_part_from_library
@@ -213,6 +217,66 @@ class FreeCADRPC:
 
     def get_object(self, doc_name, obj_name):
         return query_object(doc_name, obj_name)
+
+    def measure_distance(self, doc_name, object1, object2, sub1=None, sub2=None):
+        """Read-only OCCT distance query; safe on the RPC thread (get_objects precedent)."""
+        return _measure_distance(doc_name, object1, object2, sub1, sub2)
+
+    def get_topology(self, doc_name, obj_name, include_edges=False):
+        """Read-only topology breakdown; safe on the RPC thread."""
+        return _get_topology(doc_name, obj_name, include_edges)
+
+    def save_document(self, doc_name, file_path=None):
+        res = dispatch_to_gui(lambda: _save_document(doc_name, file_path))
+        if _ok_dict(res):
+            return res
+        return _err(res)
+
+    def export_document(self, doc_name, file_path, object_names=None):
+        # Meshing/STEP-writing large models can be slow; allow a longer wait.
+        res = dispatch_to_gui(
+            lambda: _export_document(doc_name, file_path, object_names),
+            timeout=300,
+        )
+        if _ok_dict(res):
+            return res
+        return _err(res)
+
+    def get_report_log(self, tail=100):
+        try:
+            tail = max(0, int(tail))
+        except (TypeError, ValueError):
+            return {"success": False, "error": f"invalid tail: {tail!r}"}
+        res = dispatch_to_gui(lambda: self._get_report_log_gui(tail))
+        if _ok_dict(res):
+            return res
+        return _err(res)
+
+    def _get_report_log_gui(self, tail: int):
+        from PySide import QtWidgets
+
+        mw = FreeCADGui.getMainWindow()
+        dock = mw.findChild(QtWidgets.QDockWidget, "Report view")
+        if dock is None:
+            return {
+                "success": False,
+                "error": "Report view dock not found in this FreeCAD build.",
+            }
+        text_widget = dock.findChild(QtWidgets.QPlainTextEdit) or dock.findChild(
+            QtWidgets.QTextEdit
+        )
+        if text_widget is None:
+            return {"success": False, "error": "Report view text widget not found."}
+        lines = text_widget.toPlainText().splitlines()
+        total = len(lines)
+        if tail and total > tail:
+            lines = lines[-tail:]
+        return {
+            "success": True,
+            "log": "\n".join(lines),
+            "total_lines": total,
+            "returned_lines": len(lines),
+        }
 
     def insert_part_from_library(self, relative_path):
         res = dispatch_to_gui(lambda: self._insert_part_from_library(relative_path))

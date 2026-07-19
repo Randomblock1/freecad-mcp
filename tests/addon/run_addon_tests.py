@@ -366,6 +366,146 @@ check("view_manager: explicit size honored", t_screenshot_explicit_size_honored)
 
 
 # --------------------------------------------------------------------------
+# geometry_tools: measure_distance + get_topology
+# --------------------------------------------------------------------------
+from rpc_server.geometry_tools import get_topology, measure_distance  # noqa: E402
+
+
+def t_measure_distance_between_boxes():
+    far = doc.addObject("Part::Box", "FarBox")
+    far.Length = 10
+    far.Placement = FreeCAD.Placement(FreeCAD.Vector(15, 0, 0), FreeCAD.Rotation())
+    doc.recompute()
+    res = measure_distance(DOC, "Box", "FarBox")
+    expect(res["success"] is True, f"failed: {res}")
+    expect(abs(res["distance_mm"] - 5.0) < 1e-6, f"expected 5mm, got {res['distance_mm']}")
+    expect(len(res["closest_point_on_1"]) == 3, f"points missing: {res}")
+    doc.removeObject("FarBox")
+
+
+def t_measure_distance_overlap_reports_interference():
+    near = doc.addObject("Part::Box", "NearBox")
+    near.Length = 10
+    near.Placement = FreeCAD.Placement(FreeCAD.Vector(5, 0, 0), FreeCAD.Rotation())
+    doc.recompute()
+    res = measure_distance(DOC, "Box", "NearBox")
+    expect(res["success"] is True, f"failed: {res}")
+    expect(res["distance_mm"] == 0.0, f"expected 0, got {res['distance_mm']}")
+    expect(abs(res["intersection_volume_mm3"] - 500.0) < 1e-6,
+           f"expected 500mm3 interference, got {res.get('intersection_volume_mm3')}")
+    doc.removeObject("NearBox")
+
+
+def t_measure_distance_sub_element():
+    far = doc.addObject("Part::Box", "SubBox")
+    far.Placement = FreeCAD.Placement(FreeCAD.Vector(30, 0, 0), FreeCAD.Rotation())
+    doc.recompute()
+    res = measure_distance(DOC, "Box", "SubBox", "Face1", None)
+    expect(res["success"] is True, f"failed: {res}")
+    expect(res["distance_mm"] >= 20.0, f"unexpected distance: {res['distance_mm']}")
+    bad = measure_distance(DOC, "Box", "SubBox", "Face99", None)
+    expect(bad["success"] is False and "Face99" in bad["error"], f"bad sub error: {bad}")
+    doc.removeObject("SubBox")
+
+
+def t_measure_distance_unknown_object():
+    res = measure_distance(DOC, "Box", "Bxo")
+    expect(res["success"] is False, "expected failure")
+    expect("Box" in res["error"], f"error should list available: {res['error']}")
+
+
+def t_topology_of_box():
+    res = get_topology(DOC, "Box")
+    expect(res["success"] is True, f"failed: {res}")
+    faces = res["faces"]
+    expect(len(faces) == 6, f"expected 6 faces, got {len(faces)}")
+    expect(all(f["Type"] == "Plane" for f in faces), f"non-planar face reported: {faces}")
+    expect(all(abs(f["Area"] - 100.0) < 1e-6 for f in faces), "areas wrong")
+    for f in faces:
+        n = f["Normal"]
+        expect(abs(sum(c * c for c in n) - 1.0) < 1e-6, f"normal not unit: {n}")
+        expect(len(f["Centroid"]) == 3, "centroid missing")
+    expect(res["counts"]["Faces"] == 6 and res["counts"]["Edges"] == 12
+           and res["counts"]["Vertexes"] == 8, f"bad counts: {res['counts']}")
+    expect("edges" not in res, "edges should be omitted by default")
+    withe = get_topology(DOC, "Box", True)
+    expect(len(withe["edges"]) == 12, "expected 12 edges")
+    expect(all(abs(e["Length"] - 10.0) < 1e-6 for e in withe["edges"]), "edge lengths wrong")
+
+
+def t_topology_unknown_object():
+    res = get_topology(DOC, "Bxo")
+    expect(res["success"] is False and "Box" in res["error"], f"bad error: {res}")
+
+
+check("geometry: distance between boxes", t_measure_distance_between_boxes)
+check("geometry: overlap interference volume", t_measure_distance_overlap_reports_interference)
+check("geometry: sub-element distance + bad sub error", t_measure_distance_sub_element)
+check("geometry: unknown object error", t_measure_distance_unknown_object)
+check("geometry: topology of box", t_topology_of_box)
+check("geometry: topology unknown object", t_topology_unknown_object)
+
+
+# --------------------------------------------------------------------------
+# document_io: save + export
+# --------------------------------------------------------------------------
+from rpc_server.document_io import export_document, save_document  # noqa: E402
+
+_tmpdir = tempfile.mkdtemp(prefix="freecad_mcp_test_")
+
+
+def t_save_unsaved_doc_requires_path():
+    res = save_document(DOC)
+    expect(res["success"] is False, "expected failure for never-saved doc")
+    expect("file_path" in res["error"], f"error should mention file_path: {res['error']}")
+
+
+def t_save_document_with_path():
+    path = os.path.join(_tmpdir, "addon_tests.FCStd")
+    res = save_document(DOC, path)
+    expect(res["success"] is True, f"failed: {res}")
+    expect(os.path.exists(path) and os.path.getsize(path) > 0, "file missing/empty")
+    expect(res["file_path"] == path, f"bad path: {res}")
+    res2 = save_document(DOC)  # now has a FileName; plain save must work
+    expect(res2["success"] is True, f"re-save failed: {res2}")
+
+
+def t_export_step_and_stl():
+    for ext in (".step", ".stl"):
+        path = os.path.join(_tmpdir, f"box{ext}")
+        res = export_document(DOC, path, ["Box"])
+        expect(res["success"] is True, f"{ext} failed: {res}")
+        expect(os.path.getsize(path) > 100, f"{ext} file suspiciously small")
+        expect(res["exported_objects"] == ["Box"], f"bad exported list: {res}")
+
+
+def t_export_default_objects():
+    path = os.path.join(_tmpdir, "all.step")
+    res = export_document(DOC, path)
+    expect(res["success"] is True, f"failed: {res}")
+    expect("Box" in res["exported_objects"], f"Box missing from default export: {res}")
+
+
+def t_export_bad_extension():
+    res = export_document(DOC, os.path.join(_tmpdir, "box.xyz"))
+    expect(res["success"] is False, "expected failure")
+    expect(".step" in res["error"], f"error should list supported formats: {res['error']}")
+
+
+def t_export_unknown_object():
+    res = export_document(DOC, os.path.join(_tmpdir, "nope.step"), ["Bxo"])
+    expect(res["success"] is False and "Box" in res["error"], f"bad error: {res}")
+
+
+check("document_io: unsaved doc requires path", t_save_unsaved_doc_requires_path)
+check("document_io: saveAs + save", t_save_document_with_path)
+check("document_io: export STEP and STL", t_export_step_and_stl)
+check("document_io: export default objects", t_export_default_objects)
+check("document_io: export bad extension", t_export_bad_extension)
+check("document_io: export unknown object", t_export_unknown_object)
+
+
+# --------------------------------------------------------------------------
 # result
 # --------------------------------------------------------------------------
 # freecadcmd exits 0 even when the script raises, so callers must grep for
