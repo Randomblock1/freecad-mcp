@@ -11,6 +11,13 @@ from typing import Any
 
 from PySide import QtCore
 
+from rpc_server.code_exec import (
+    async_job_status,
+    complete_async_job,
+    exec_namespace,
+    format_exec_error,
+    start_async_job,
+)
 from rpc_server.commands import register_commands, schedule_toggle_sync
 from rpc_server.fem_executor import run_fem_analysis as _run_fem_analysis
 from rpc_server.gui_dispatch import (
@@ -118,11 +125,11 @@ class FreeCADRPC:
         return {"success": False, "error": str(res)}
 
     def execute_code_async(self, code: str) -> dict[str, Any]:
-        """Start code execution in a background thread and return immediately.
+        """Start code execution in a background thread and return a job id.
 
         Use for long-running OCCT operations (fuse/cut/loft) that would otherwise
-        exceed the MCP timeout. The caller should poll a document object for
-        completion status (e.g. check SessionState.Label via get_object).
+        exceed the MCP timeout. Poll get_async_status(job_id) for completion,
+        errors, and tracebacks.
         """
         def _set_status(msg):
             dispatch_to_gui(lambda: FreeCADGui.getMainWindow().statusBar().showMessage(msg))
@@ -130,25 +137,38 @@ class FreeCADRPC:
         def _clear_status():
             dispatch_to_gui(lambda: FreeCADGui.getMainWindow().statusBar().clearMessage())
 
+        job_id = start_async_job(code)
+
         def worker() -> None:
             # NOTE: we do NOT redirect sys.stdout here. contextlib.redirect_stdout
             # swaps stdout process-wide, not per-thread, so it would race with the
             # GUI thread and other concurrent work. Background code should report
             # via FreeCAD.Console (which is thread-safe) instead.
+            error = None
             try:
-                exec(code, globals())
-                FreeCAD.Console.PrintMessage("Async code execution completed.\n")
+                exec(code, exec_namespace())
+                FreeCAD.Console.PrintMessage(f"Async job {job_id} completed.\n")
             except Exception as e:
-                import traceback as _tb
+                error = format_exec_error(e)
                 FreeCAD.Console.PrintError(
-                    f"Async code error: {e}\n{_tb.format_exc()}"
+                    f"Async job {job_id} failed: {error['error']}\n"
+                    f"{error.get('traceback', '')}\n"
                 )
             finally:
+                complete_async_job(job_id, error)
                 _clear_status()
 
         _set_status("MCP: running background task…")
         threading.Thread(target=worker, daemon=True).start()
-        return {"success": True, "message": "Code execution started in background."}
+        return {
+            "success": True,
+            "job_id": job_id,
+            "message": "Code execution started in background.",
+        }
+
+    def get_async_status(self, job_id: str | None = None) -> dict[str, Any]:
+        """Status of one background job (or all jobs when job_id is None)."""
+        return async_job_status(job_id)
 
     def execute_code(self, code: str) -> dict[str, Any]:
         """Execute Python code on the GUI thread and wait for the result.
@@ -157,13 +177,20 @@ class FreeCADRPC:
         (addObject, recompute, save) are safe and correctly ordered.
         Use execute_code_async for heavy OCCT boolean ops (fuse/cut)
         that would block the GUI thread too long.
+
+        On failure, returns the exception, the traceback frames pointing into
+        the submitted code (line numbers refer to the submitted string), and
+        whatever the code printed before dying.
         """
         output_buffer = io.StringIO()
 
         def task():
-            with contextlib.redirect_stdout(output_buffer):
-                exec(code, globals())
-            return True
+            try:
+                with contextlib.redirect_stdout(output_buffer):
+                    exec(code, exec_namespace())
+                return True
+            except Exception as e:
+                return {**format_exec_error(e), "stdout": output_buffer.getvalue()}
 
         res = dispatch_to_gui(task, timeout=self.EXECUTE_CODE_TIMEOUT)
         if _ok(res):
@@ -174,8 +201,9 @@ class FreeCADRPC:
             }
         # Log the offending code (truncated) to make errors traceable
         code_preview = code if len(code) <= 800 else code[:800] + "\n...(truncated)"
+        err_text = res.get("error") if isinstance(res, dict) else res
         FreeCAD.Console.PrintError(
-            f"Error executing Python code: {res}\n"
+            f"Error executing Python code: {err_text}\n"
             f"--- code ---\n{code_preview}\n--- end ---\n"
         )
         return _err(res)

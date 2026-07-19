@@ -250,6 +250,78 @@ check("document_query: object success", t_query_object_success)
 
 
 # --------------------------------------------------------------------------
+# code_exec: persistent namespace, error formatting, async registry
+# --------------------------------------------------------------------------
+from rpc_server.code_exec import (  # noqa: E402
+    async_job_status,
+    complete_async_job,
+    exec_namespace,
+    format_exec_error,
+    start_async_job,
+)
+
+
+def t_namespace_persists_and_preloads():
+    ns = exec_namespace()
+    expect(ns["App"] is FreeCAD, "App not preloaded")
+    exec("probe_var = 41", ns)
+    exec("probe_var += 1", exec_namespace())
+    expect(exec_namespace()["probe_var"] == 42, "namespace did not persist between execs")
+    expect(ns is not globals(), "namespace must not be module globals")
+
+
+def t_format_runtime_error_has_line():
+    try:
+        exec("y = 1\nz = y / 0", exec_namespace())
+    except Exception as e:
+        detail = format_exec_error(e)
+    expect(detail["success"] is False, "success should be False")
+    expect("ZeroDivisionError" in detail["error"], f"bad error: {detail['error']}")
+    expect("line 2" in detail["traceback"], f"traceback missing line 2: {detail['traceback']}")
+
+
+def t_format_syntax_error_has_line():
+    try:
+        exec("ok = 1\ndef broken(:\n    pass", exec_namespace())
+    except SyntaxError as e:
+        detail = format_exec_error(e)
+    expect("SyntaxError" in detail["error"], f"bad error: {detail['error']}")
+    expect("line 2" in detail["traceback"], f"traceback missing line 2: {detail['traceback']}")
+
+
+def t_async_registry_lifecycle():
+    job_id = start_async_job("import time; time.sleep(1)")
+    running = async_job_status(job_id)
+    expect(running["status"] == "running", f"expected running: {running}")
+    expect("runtime_s" in running, "running job should report runtime")
+    complete_async_job(job_id, None)
+    done = async_job_status(job_id)
+    expect(done["status"] == "completed", f"expected completed: {done}")
+    expect("finished_at" in done, "finished_at missing")
+
+    fail_id = start_async_job("boom()")
+    complete_async_job(fail_id, {"error": "NameError: name 'boom' is not defined",
+                                 "traceback": '  File "<string>", line 1'})
+    failed = async_job_status(fail_id)
+    expect(failed["status"] == "failed", f"expected failed: {failed}")
+    expect("NameError" in failed["error"], f"error missing: {failed}")
+
+    all_jobs = async_job_status(None)
+    expect(all_jobs["success"] is True and len(all_jobs["jobs"]) >= 2,
+           f"jobs listing wrong: {all_jobs}")
+
+    unknown = async_job_status("nope")
+    expect(unknown["success"] is False, "unknown id should fail")
+    expect(job_id in unknown["known_job_ids"], f"known ids missing: {unknown}")
+
+
+check("code_exec: namespace persists and preloads", t_namespace_persists_and_preloads)
+check("code_exec: runtime error formatted with line", t_format_runtime_error_has_line)
+check("code_exec: syntax error formatted with line", t_format_syntax_error_has_line)
+check("code_exec: async registry lifecycle", t_async_registry_lifecycle)
+
+
+# --------------------------------------------------------------------------
 # result
 # --------------------------------------------------------------------------
 # freecadcmd exits 0 even when the script raises, so callers must grep for

@@ -143,7 +143,12 @@ def _execute_code(
             skip_screenshot = only_text_feedback or not include_screenshot
             screenshot = None if skip_screenshot else freecad.get_active_screenshot(view_name)
             return add_screenshot_if_available(response, screenshot, skip_screenshot)
-        return text_response(f"Failed to execute code: {res['error']}")
+        parts = [f"Failed to execute code: {res.get('error', 'unknown error')}"]
+        if res.get("traceback"):
+            parts.append(res["traceback"])
+        if res.get("stdout"):
+            parts.append(f"--- output before error ---\n{res['stdout']}")
+        return text_response("\n".join(parts))
     except Exception as e:
         logger.error(f"Failed to execute code: {str(e)}")
         return text_response(f"Failed to execute code: {str(e)}")
@@ -207,16 +212,34 @@ def execute_code_async_operation(
     try:
         res = freecad.execute_code_async(code)
         if res["success"]:
+            job_id = res.get("job_id", "unknown")
             return text_response(
-                "Code execution started in background.\n"
-                "Use get_object to poll a document object for completion "
-                "(e.g. check SessionState.Label). "
-                "FreeCAD's Report View will show output when done."
+                f"Background job '{job_id}' started.\n"
+                f"Poll get_async_status(job_id='{job_id}') for completion, errors, "
+                "and tracebacks. Printed output goes to FreeCAD's console "
+                "(readable via get_report_log)."
             )
         return text_response(f"Failed to start async execution: {res.get('error', 'unknown')}")
     except Exception as e:
         logger.error(f"Failed to start async code execution: {str(e)}")
         return text_response(f"Failed to start async code execution: {str(e)}")
+
+
+def get_async_status_operation(
+    freecad: FreeCADConnection,
+    job_id: str | None = None,
+) -> ToolResponse:
+    try:
+        res = freecad.get_async_status(job_id)
+        if res.get("success") is False:
+            parts = [res.get("error", "unknown error")]
+            if res.get("known_job_ids") is not None:
+                parts.append(f"Known job ids: {res['known_job_ids']}")
+            return text_response(" ".join(parts))
+        return json_response(res)
+    except Exception as e:
+        logger.error(f"Failed to get async status: {str(e)}")
+        return text_response(f"Failed to get async status: {str(e)}")
 
 
 def get_view_operation(

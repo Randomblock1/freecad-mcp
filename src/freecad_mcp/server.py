@@ -14,6 +14,7 @@ from .operations import (
     execute_code_async_operation,
     execute_code_from_file_operation,
     execute_code_operation,
+    get_async_status_operation,
     get_object_operation,
     get_objects_operation,
     get_parts_list_operation,
@@ -338,20 +339,36 @@ def execute_code_async(ctx: Context, code: str) -> list[TextContent]:
     or other CPU-bound computations that do not interact with the document or GUI.
 
     Typical usage pattern:
-    1. Fetch shapes into local variables first (via execute_code on the GUI thread).
-    2. Store intermediate results in a module-level Python variable (not in the
-       FreeCAD document) so execute_code can read them later.
-    3. Run the heavy computation via execute_code_async.
-    4. After the expected computation time has elapsed, apply results to the
-       document via execute_code (which runs on the GUI thread).
+    1. Fetch shapes into variables first (via execute_code on the GUI thread);
+       the execution namespace is shared, so execute_code_async sees them.
+    2. Run the heavy computation via execute_code_async; note the returned job id.
+    3. Poll get_async_status(job_id) until status is "completed" or "failed"
+       (failures include the error and traceback).
+    4. Apply results to the document via execute_code (which runs on the GUI
+       thread) — the shared namespace still holds the computed values.
 
     Args:
         code: Background-safe Python code to execute.
 
     Returns:
-        A message confirming that background execution has started.
+        A message with the background job id to poll via get_async_status.
     """
     return execute_code_async_operation(get_freecad_connection(), code)
+
+
+@mcp.tool()
+def get_async_status(ctx: Context, job_id: str | None = None) -> list[TextContent]:
+    """Get the status of background jobs started with execute_code_async.
+
+    Args:
+        job_id: The job id returned by execute_code_async. Omit to list all
+            jobs from this FreeCAD session (newest first).
+
+    Returns:
+        Job status: "running" (with runtime_s), "completed", or "failed"
+        (with the error and the traceback pointing into the submitted code).
+    """
+    return get_async_status_operation(get_freecad_connection(), job_id)
 
 
 @mcp.tool()
@@ -367,6 +384,14 @@ def execute_code(
     iterate on, write them to a file and use execute_code_from_file instead,
     so you can edit the file selectively and re-run it without resending the
     full source each time.
+
+    State persists across calls: variables and helpers you define remain
+    available to later execute_code and execute_code_async calls for the
+    FreeCAD session. FreeCAD/App and FreeCADGui/Gui are pre-imported. The
+    namespace is isolated from the RPC server's internals.
+
+    On failure you get the exception, the traceback line numbers within your
+    submitted code, and any output printed before the error.
 
     Args:
         code: The Python code to execute.
