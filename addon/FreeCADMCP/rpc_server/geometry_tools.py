@@ -67,14 +67,25 @@ def measure_distance(
             result["closest_point_on_1"] = [p1.x, p1.y, p1.z]
             result["closest_point_on_2"] = [p2.x, p2.y, p2.z]
         if dist == 0 and sub1 is None and sub2 is None:
-            try:
-                result["intersection_volume_mm3"] = shape1.common(shape2).Volume
+            # common() is a full OCCT boolean; it runs on the RPC thread with no
+            # timeout, so skip it on large shapes rather than stalling every
+            # other tool call for minutes on tens-of-thousands-of-face solids.
+            total_faces = len(shape1.Faces) + len(shape2.Faces)
+            if total_faces > _INTERSECTION_FACE_LIMIT:
                 result["note"] = (
-                    "Shapes touch or overlap. intersection_volume_mm3 > 0 means "
-                    "actual interference; ~0 means surfaces merely touch."
+                    f"Shapes touch or overlap. Interference volume skipped "
+                    f"({total_faces} faces exceeds the {_INTERSECTION_FACE_LIMIT}-face "
+                    "limit for the on-demand boolean); compute it with execute_code if needed."
                 )
-            except Exception:
-                result["note"] = "Shapes touch or overlap (intersection volume unavailable)."
+            else:
+                try:
+                    result["intersection_volume_mm3"] = shape1.common(shape2).Volume
+                    result["note"] = (
+                        "Shapes touch or overlap. intersection_volume_mm3 > 0 means "
+                        "actual interference; ~0 means surfaces merely touch."
+                    )
+                except Exception:
+                    result["note"] = "Shapes touch or overlap (intersection volume unavailable)."
         return result
     except ValueError as e:
         return {"success": False, "error": str(e)}
@@ -85,6 +96,10 @@ def measure_distance(
 # Faces/edges beyond this are omitted (with an explicit truncation note) to
 # keep responses bounded on organic/imported geometry.
 _TOPO_LIMIT = 200
+
+# measure_distance computes an OCCT intersection boolean for interference when
+# shapes overlap; skip it above this combined face count (see measure_distance).
+_INTERSECTION_FACE_LIMIT = 2000
 
 
 def get_topology(doc_name: str, obj_name: str, include_edges: bool = False) -> dict:
@@ -114,7 +129,11 @@ def get_topology(doc_name: str, obj_name: str, include_edges: bool = False) -> d
 
     faces = []
     for i, face in enumerate(shape.Faces[:_TOPO_LIMIT]):
-        entry = {"Name": f"Face{i + 1}", "Type": type(face.Surface).__name__}
+        entry = {"Name": f"Face{i + 1}"}
+        try:
+            entry["Type"] = type(face.Surface).__name__
+        except Exception:
+            entry["Type"] = "unknown"
         try:
             entry["Area"] = face.Area
         except Exception:
@@ -142,7 +161,13 @@ def get_topology(doc_name: str, obj_name: str, include_edges: bool = False) -> d
     if include_edges:
         edges = []
         for i, edge in enumerate(shape.Edges[:_TOPO_LIMIT]):
-            entry = {"Name": f"Edge{i + 1}", "Type": type(edge.Curve).__name__}
+            entry = {"Name": f"Edge{i + 1}"}
+            # Degenerate edges (e.g. the pole edges of a sphere) raise
+            # "undefined curve type" on .Curve; keep the rest of the entry.
+            try:
+                entry["Type"] = type(edge.Curve).__name__
+            except Exception:
+                entry["Type"] = "unknown"
             try:
                 entry["Length"] = edge.Length
             except Exception:
@@ -156,5 +181,8 @@ def get_topology(doc_name: str, obj_name: str, include_edges: bool = False) -> d
         result["edges"] = edges
         if len(shape.Edges) > _TOPO_LIMIT:
             result["truncated"] = True
+            result["note"] = (
+                f"Only the first {_TOPO_LIMIT} of {len(shape.Edges)} edges are listed."
+            )
 
     return result

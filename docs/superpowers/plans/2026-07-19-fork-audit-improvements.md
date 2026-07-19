@@ -12,7 +12,7 @@
 
 **Verification environments:**
 - Pure-Python MCP-side tests: `uv run --with pytest pytest tests/ -q` (run from repo root).
-- Addon-side headless tests: `freecadcmd tests/addon/run_addon_tests.py` (exit code 0 = pass).
+- Addon-side headless tests: `freecadcmd tests/addon/run_addon_tests.py` — grep the output for the `ALL ADDON TESTS PASSED` sentinel; freecadcmd's exit code is unreliable (it exits 0 even on an uncaught exception), though the runner catches setup/import crashes and forces `sys.exit(1)` for those.
 - Live e2e: FreeCAD GUI instance with addon at `/home/benjamin/.local/share/FreeCAD/v1-1/Mod/FreeCADMCP/`, RPC on `localhost:9875`. Deploy = backup dir, copy `addon/FreeCADMCP/*` over it, schedule in-process RPC-server restart via `execute_code` (QTimer.singleShot → stop server, purge `rpc_server*` from `sys.modules`, re-import, start). Clean up all test documents afterward.
 
 ---

@@ -389,7 +389,7 @@ def export_document_operation(
             return _lookup_error_response(res, "export document")
         return text_response(
             f"Exported {res['exported_objects']} to {res['file_path']} "
-            f"({res['file_size_bytes']} bytes)"
+            f"({int(res['file_size_bytes'])} bytes)"
         )
     except Exception as e:
         logger.error(f"Failed to export document: {str(e)}")

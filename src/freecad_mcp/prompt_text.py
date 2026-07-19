@@ -54,11 +54,15 @@ A complete static analysis needs, in order (all via create_object unless noted):
 2. Analysis container — obj_type "Fem::AnalysisPython":
 {"doc_name": "Doc", "obj_name": "FemAnalysis", "obj_type": "Fem::AnalysisPython"}
 
-3. Material — obj_type "Fem::MaterialCommon", attached via analysis_name:
+3. Material — obj_type "Fem::MaterialCommon", attached via analysis_name.
+   The Material property is a string->string map: EVERY value must be a quoted
+   string (a bare number like 0.3 is rejected), and the stiffness key is
+   "YoungsModulus" (with the "s"), which the solver's prerequisite check
+   requires:
 {"doc_name": "Doc", "obj_name": "Material", "obj_type": "Fem::MaterialCommon",
  "analysis_name": "FemAnalysis",
  "obj_properties": {"Material": {"Name": "Steel", "Density": "7900 kg/m^3",
-                    "YoungModulus": "210 GPa", "PoissonRatio": 0.3}}}
+                    "YoungsModulus": "210 GPa", "PoissonRatio": "0.3"}}}
 
 4. Constraints — e.g. "Fem::ConstraintFixed" / "Fem::ConstraintForce" /
    "Fem::ConstraintPressure". References name an object and a face; get face
@@ -66,7 +70,16 @@ A complete static analysis needs, in order (all via create_object unless noted):
 {"doc_name": "Doc", "obj_name": "Fixed", "obj_type": "Fem::ConstraintFixed",
  "analysis_name": "FemAnalysis",
  "obj_properties": {"References": [{"object_name": "Box", "face": "Face1"}]}}
-Force constraints also take e.g. "Force": 1000 (N) and "Direction" references.
+Force constraints take a Force quantity that MUST be a unit string — "Force":
+"1000 N". A bare number ("Force": 1000) is silently interpreted in FreeCAD's
+internal units (millinewtons), i.e. 1000x too small. The force direction
+defaults to the referenced face's normal; to set an explicit direction, bind
+ConstraintForce.Direction to an edge via execute_code (it is not settable
+through obj_properties):
+{"doc_name": "Doc", "obj_name": "Load", "obj_type": "Fem::ConstraintForce",
+ "analysis_name": "FemAnalysis",
+ "obj_properties": {"References": [{"object_name": "Box", "face": "Face2"}],
+                    "Force": "1000 N"}}
 
 5. Mesh — obj_type "Fem::FemMeshGmsh" (Gmsh runs automatically on creation).
    "Shape" names the geometry object (legacy "Part" also accepted). On
@@ -78,7 +91,7 @@ Force constraints also take e.g. "Force": 1000 (N) and "Direction" references.
                     "CharacteristicLengthMin": 0.1}}
 
 6. Solve with run_fem_analysis(doc_name, analysis_name). A SolverCcxTools is
-   auto-created if missing. Returns max von Mises stress (MPa), max/min
+   auto-created if missing. Returns max and min von Mises stress (MPa), max
    displacement (mm), and node count. The solver blocks all other RPC calls
    while running; do not issue parallel requests.
 """

@@ -30,12 +30,28 @@ def test_measure_distance_error_lists_available():
     assert "Box" in text and "Failed" in text
 
 
-def test_get_topology_passes_flags():
+def test_get_topology_passes_flags_and_returns_json():
     fake = FakeFreeCAD(
-        get_topology={"success": True, "faces": [], "counts": {"Faces": 0, "Edges": 0, "Vertexes": 0}}
+        get_topology={
+            "success": True,
+            "faces": [{"Name": "Face1", "Type": "Plane"}],
+            "counts": {"Faces": 1, "Edges": 4, "Vertexes": 4},
+        }
     )
-    core.get_topology_operation(fake, "Doc", "Box", True)
+    text = text_of(core.get_topology_operation(fake, "Doc", "Box", True))
     assert ("get_topology", ("Doc", "Box", True)) in fake.calls
+    assert '"counts"' in text and "Face1" in text
+
+
+def test_get_topology_error_branch_lists_available():
+    fake = FakeFreeCAD(
+        get_topology={
+            "success": False,
+            "error": "Object 'Bxo' not found in 'Doc'. Available: ['Box']",
+        }
+    )
+    text = text_of(core.get_topology_operation(fake, "Doc", "Bxo"))
+    assert "Failed to get topology" in text and "Box" in text
 
 
 def test_save_document_reports_path():

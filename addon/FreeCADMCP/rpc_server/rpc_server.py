@@ -17,6 +17,7 @@ from rpc_server.code_exec import (
     exec_namespace,
     format_exec_error,
     start_async_job,
+    xml_safe,
 )
 from rpc_server.commands import register_commands, schedule_toggle_sync
 from rpc_server.fem_executor import run_fem_analysis as _run_fem_analysis
@@ -152,7 +153,10 @@ class FreeCADRPC:
             try:
                 exec(code, exec_namespace())
                 FreeCAD.Console.PrintMessage(f"Async job {job_id} completed.\n")
-            except Exception as e:
+            except BaseException as e:
+                # BaseException, not Exception: user code that calls sys.exit()
+                # raises SystemExit, which threading otherwise swallows silently
+                # and which would leave the job marked "completed" (false success).
                 error = format_exec_error(e)
                 FreeCAD.Console.PrintError(
                     f"Async job {job_id} failed: {error['error']}\n"
@@ -194,14 +198,15 @@ class FreeCADRPC:
                     exec(code, exec_namespace())
                 return True
             except Exception as e:
-                return {**format_exec_error(e), "stdout": output_buffer.getvalue()}
+                return {**format_exec_error(e), "stdout": xml_safe(output_buffer.getvalue())}
 
         res = dispatch_to_gui(task, timeout=self.EXECUTE_CODE_TIMEOUT)
         if _ok(res):
             FreeCAD.Console.PrintMessage("Python code executed successfully.\n")
             return {
                 "success": True,
-                "message": "Python code executed successfully.\nOutput: " + output_buffer.getvalue(),
+                "message": "Python code executed successfully.\nOutput: "
+                + xml_safe(output_buffer.getvalue()),
             }
         # Log the offending code (truncated) to make errors traceable
         code_preview = code if len(code) <= 800 else code[:800] + "\n...(truncated)"
@@ -273,7 +278,9 @@ class FreeCADRPC:
             lines = lines[-tail:]
         return {
             "success": True,
-            "log": "\n".join(lines),
+            # Report-view text is arbitrary (user PrintMessage/PrintError, solver
+            # output); strip XML-illegal control chars so the response marshals.
+            "log": xml_safe("\n".join(lines)),
             "total_lines": total,
             "returned_lines": len(lines),
         }

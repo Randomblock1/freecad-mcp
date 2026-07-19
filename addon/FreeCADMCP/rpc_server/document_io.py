@@ -129,7 +129,10 @@ def export_document(
         return {
             "success": True,
             "file_path": path,
-            "file_size_bytes": os.path.getsize(path),
+            # float, not int: XML-RPC <int> is limited to +/-2^31, and a finely
+            # tessellated export can exceed 2 GiB. Doubles are exact for integer
+            # sizes up to 2^53 (8 PB), so no precision is lost in practice.
+            "file_size_bytes": float(os.path.getsize(path)),
             "exported_objects": [o.Name for o in objects],
         }
     except Exception as e:

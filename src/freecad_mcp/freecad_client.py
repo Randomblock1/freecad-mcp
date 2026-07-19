@@ -117,7 +117,12 @@ class FreeCADConnection:
         file_path: str,
         object_names: list[str] | None = None,
     ) -> dict[str, Any]:
-        return self.server.export_document(doc_name, file_path, object_names)
+        # The addon dispatches export with a 300 s GUI-thread allowance for slow
+        # meshing/STEP writes; the default 150 s transport socket timeout would
+        # abort mid-export while the addon keeps working (and still writes the
+        # file). Use a proxy whose socket outlasts the addon allowance.
+        proxy = self._make_proxy(max(self._timeout, 330))
+        return proxy.export_document(doc_name, file_path, object_names)
 
     def get_report_log(self, tail: int = 100) -> dict[str, Any]:
         return self.server.get_report_log(tail)

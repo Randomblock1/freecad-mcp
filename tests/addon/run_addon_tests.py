@@ -2,7 +2,13 @@
 
 Exercises the rpc_server modules that don't need a GUI (serialize, object
 factory, geometry tools, document IO) against real FreeCAD documents.
-Exits nonzero when any check fails.
+
+Pass/fail contract: freecadcmd's process exit code is NOT reliable (it exits 0
+even on an uncaught exception and re-executes the script), so callers must
+check the printed sentinel: success prints "ALL ADDON TESTS PASSED" as the last
+line. Its absence — whether from a failed check or a crash during import/setup
+(which this file catches and turns into a sys.exit(1), the one path freecadcmd
+does propagate) — means failure.
 """
 
 import math
@@ -42,31 +48,55 @@ def expect(cond, msg):
         raise AssertionError(msg)
 
 
-# --------------------------------------------------------------------------
-# serialize.py
-# --------------------------------------------------------------------------
-from rpc_server.serialize import (  # noqa: E402
-    SCAFFOLDING_TYPE_IDS,
-    serialize_object,
-    serialize_shape,
-    serialize_value,
-    summarize_object,
-)
+# All rpc_server imports and shared fixtures live in one guarded block. A
+# refactor that renames or moves a symbol raises here at module level, which
+# freecadcmd would otherwise swallow (exit 0, re-execute) — so we catch it and
+# route it through sys.exit(1), the one exit path freecadcmd propagates, and
+# the success sentinel never prints. Individual check() bodies are guarded too.
+try:
+    from rpc_server.serialize import (  # noqa: E402
+        SCAFFOLDING_TYPE_IDS,
+        serialize_object,
+        serialize_shape,
+        serialize_value,
+        summarize_object,
+    )
+    from rpc_server.object_factory import create_object_gui  # noqa: E402
+    from rpc_server.property_mapper import Object  # noqa: E402
+    from rpc_server.document_query import query_object, query_objects  # noqa: E402
+    from rpc_server.code_exec import (  # noqa: E402
+        async_job_status,
+        complete_async_job,
+        exec_namespace,
+        format_exec_error,
+        start_async_job,
+        xml_safe,
+    )
+    from rpc_server.view_manager import DEFAULT_MAX_EDGE, _resolve_screenshot_size  # noqa: E402
+    from rpc_server.geometry_tools import get_topology, measure_distance  # noqa: E402
+    from rpc_server.document_io import export_document, save_document  # noqa: E402
+    import rpc_server.code_exec as _code_exec  # noqa: E402  # for isolation check
 
-# freecadcmd re-executes the script after an uncaught exception, which would
-# leave a stale "AddonTests" document and silently misdirect name-based
-# lookups; close leftovers and always address the doc by its actual name.
-for _stale in list(FreeCAD.listDocuments()):
-    if _stale.startswith("AddonTests"):
-        FreeCAD.closeDocument(_stale)
-doc = FreeCAD.newDocument("AddonTests")
-DOC = doc.Name
+    # Close any stale AddonTests doc left by a prior crashed run, then build the
+    # shared fixture doc + box. Address the doc by doc.Name, never the requested
+    # name, since FreeCAD may have deduplicated it.
+    for _stale in list(FreeCAD.listDocuments()):
+        if _stale.startswith("AddonTests"):
+            FreeCAD.closeDocument(_stale)
+    doc = FreeCAD.newDocument("AddonTests")
+    DOC = doc.Name
 
-box = doc.addObject("Part::Box", "Box")
-box.Length = 10
-box.Width = 10
-box.Height = 10
-doc.recompute()
+    box = doc.addObject("Part::Box", "Box")
+    box.Length = 10
+    box.Width = 10
+    box.Height = 10
+    doc.recompute()
+
+    _tmpdir = tempfile.mkdtemp(prefix="freecad_mcp_test_")
+except BaseException:
+    p("ADDON TESTS CRASHED DURING SETUP")
+    p(traceback.format_exc())
+    sys.exit(1)
 
 
 def t_empty_body_serializes():
@@ -167,10 +197,6 @@ check("serialize: scaffolding type ids", t_scaffolding_type_ids)
 # --------------------------------------------------------------------------
 # object_factory: actual names + recompute state
 # --------------------------------------------------------------------------
-from rpc_server.object_factory import create_object_gui  # noqa: E402
-from rpc_server.property_mapper import Object  # noqa: E402
-
-
 def t_create_returns_actual_name_on_collision():
     first = create_object_gui(DOC, Object(name="DupBox", type="Part::Box"))
     second = create_object_gui(DOC, Object(name="DupBox", type="Part::Box"))
@@ -197,17 +223,32 @@ def t_create_unknown_doc_errors():
     expect(isinstance(res, str) and "not found" in res, f"expected error string: {res!r}")
 
 
+def t_material_float_value_coerced():
+    # property_mapper stringifies Material map values so a numeric PoissonRatio
+    # (0.3) is accepted rather than hard-failing on FreeCAD's string-only map.
+    an = create_object_gui(DOC, Object(name="Analysis1", type="Fem::AnalysisPython"))
+    expect(an["success"], f"analysis create failed: {an}")
+    mat = create_object_gui(DOC, Object(
+        name="Mat1", type="Fem::MaterialCommon", analysis="Analysis1",
+        properties={"Material": {"Name": "Steel", "YoungsModulus": "210 GPa",
+                                 "PoissonRatio": 0.3}}))
+    expect(mat["success"], f"material create failed (coercion regressed?): {mat}")
+    m = doc.getObject(mat["object_name"])
+    expect(m.Material.get("PoissonRatio") == "0.3",
+           f"float PoissonRatio not coerced to string: {dict(m.Material)}")
+    doc.removeObject(mat["object_name"])
+    doc.removeObject("Analysis1")
+
+
 check("object_factory: name collision returns actual name", t_create_returns_actual_name_on_collision)
 check("object_factory: invalid cut warns", t_create_invalid_cut_warns)
+check("object_factory: Material float value coerced", t_material_float_value_coerced)
 check("object_factory: unknown doc errors", t_create_unknown_doc_errors)
 
 
 # --------------------------------------------------------------------------
 # document_query: structured errors + detail levels
 # --------------------------------------------------------------------------
-from rpc_server.document_query import query_object, query_objects  # noqa: E402
-
-
 def t_query_objects_summary_omits_scaffolding():
     body = doc.addObject("PartDesign::Body", "QueryBody")
     doc.recompute()
@@ -259,22 +300,21 @@ check("document_query: object success", t_query_object_success)
 # --------------------------------------------------------------------------
 # code_exec: persistent namespace, error formatting, async registry
 # --------------------------------------------------------------------------
-from rpc_server.code_exec import (  # noqa: E402
-    async_job_status,
-    complete_async_job,
-    exec_namespace,
-    format_exec_error,
-    start_async_job,
-)
-
-
 def t_namespace_persists_and_preloads():
     ns = exec_namespace()
     expect(ns["App"] is FreeCAD, "App not preloaded")
     exec("probe_var = 41", ns)
     exec("probe_var += 1", exec_namespace())
     expect(exec_namespace()["probe_var"] == 42, "namespace did not persist between execs")
-    expect(ns is not globals(), "namespace must not be module globals")
+    # The whole point of the fork's exec-namespace fix: user code must NOT run in
+    # any rpc_server module's globals (the old bug was exec(code, globals()) in
+    # rpc_server.py, letting scripts clobber RPC internals). Assert against the
+    # module dict that would actually be at risk, and prove a clobber is contained.
+    expect(ns is not vars(_code_exec), "exec namespace must not be code_exec's globals")
+    exec("format_exec_error = 'clobbered'", exec_namespace())
+    expect(callable(_code_exec.format_exec_error),
+           "user code clobbered a code_exec module attribute — namespace not isolated")
+    del exec_namespace()["format_exec_error"]
 
 
 def t_format_runtime_error_has_line():
@@ -322,18 +362,35 @@ def t_async_registry_lifecycle():
     expect(job_id in unknown["known_job_ids"], f"known ids missing: {unknown}")
 
 
+def t_format_system_exit_is_failure():
+    # sys.exit() raises SystemExit (a BaseException, not Exception); the async
+    # worker must treat it as a failure, not a clean finish.
+    try:
+        exec("import sys\nsys.exit('aborted')", exec_namespace())
+    except BaseException as e:
+        detail = format_exec_error(e)
+    expect(detail["success"] is False, "SystemExit must format as failure")
+    expect("SystemExit" in detail["error"], f"bad error: {detail['error']}")
+
+
+def t_xml_safe_strips_control_chars():
+    out = xml_safe("red\x1b[31mtext\x00end\ttab\nnewline")
+    expect("\x1b" not in out and "\x00" not in out, f"control chars remain: {out!r}")
+    expect("\t" in out and "\n" in out, "tab/newline must be preserved")
+    expect("redtext" not in out, "expected replacement char between segments")
+
+
 check("code_exec: namespace persists and preloads", t_namespace_persists_and_preloads)
 check("code_exec: runtime error formatted with line", t_format_runtime_error_has_line)
 check("code_exec: syntax error formatted with line", t_format_syntax_error_has_line)
+check("code_exec: SystemExit formats as failure", t_format_system_exit_is_failure)
+check("code_exec: xml_safe strips control chars", t_xml_safe_strips_control_chars)
 check("code_exec: async registry lifecycle", t_async_registry_lifecycle)
 
 
 # --------------------------------------------------------------------------
 # view_manager: default screenshot size cap
 # --------------------------------------------------------------------------
-from rpc_server.view_manager import DEFAULT_MAX_EDGE, _resolve_screenshot_size  # noqa: E402
-
-
 class _StubView:
     def __init__(self, w, h):
         self._size = (w, h)
@@ -368,9 +425,6 @@ check("view_manager: explicit size honored", t_screenshot_explicit_size_honored)
 # --------------------------------------------------------------------------
 # geometry_tools: measure_distance + get_topology
 # --------------------------------------------------------------------------
-from rpc_server.geometry_tools import get_topology, measure_distance  # noqa: E402
-
-
 def t_measure_distance_between_boxes():
     far = doc.addObject("Part::Box", "FarBox")
     far.Length = 10
@@ -438,22 +492,34 @@ def t_topology_unknown_object():
     expect(res["success"] is False and "Box" in res["error"], f"bad error: {res}")
 
 
+def t_topology_sphere_degenerate_edges():
+    # A sphere has degenerate pole edges whose .Curve raises "undefined curve
+    # type"; get_topology(include_edges=True) must survive it, not fault the call.
+    import Part
+
+    sph = doc.addObject("Part::Feature", "Sphere")
+    sph.Shape = Part.makeSphere(5)
+    doc.recompute()
+    res = get_topology(DOC, "Sphere", True)
+    expect(res["success"] is True, f"sphere topology faulted: {res}")
+    expect(len(res["edges"]) == res["counts"]["Edges"], "edge list truncated unexpectedly")
+    expect(any(e["Type"] == "unknown" for e in res["edges"]),
+           "degenerate edge should report Type 'unknown', not crash")
+    doc.removeObject("Sphere")
+
+
 check("geometry: distance between boxes", t_measure_distance_between_boxes)
 check("geometry: overlap interference volume", t_measure_distance_overlap_reports_interference)
 check("geometry: sub-element distance + bad sub error", t_measure_distance_sub_element)
 check("geometry: unknown object error", t_measure_distance_unknown_object)
 check("geometry: topology of box", t_topology_of_box)
 check("geometry: topology unknown object", t_topology_unknown_object)
+check("geometry: sphere degenerate edges survive", t_topology_sphere_degenerate_edges)
 
 
 # --------------------------------------------------------------------------
 # document_io: save + export
 # --------------------------------------------------------------------------
-from rpc_server.document_io import export_document, save_document  # noqa: E402
-
-_tmpdir = tempfile.mkdtemp(prefix="freecad_mcp_test_")
-
-
 def t_save_unsaved_doc_requires_path():
     res = save_document(DOC)
     expect(res["success"] is False, "expected failure for never-saved doc")

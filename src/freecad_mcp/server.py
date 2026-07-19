@@ -636,10 +636,12 @@ def get_report_log(ctx: Context, tail: int = 100) -> list[TextContent]:
     jobs finish.
 
     Args:
-        tail: Number of trailing lines to return (default 100).
+        tail: Number of trailing lines to return (default 100). Pass 0 (or a
+            negative value) to return the entire log — use with care, a long
+            session's log can be thousands of lines.
 
     Returns:
-        The last `tail` lines of the report log.
+        The last `tail` lines of the report log (or the whole log when tail<=0).
     """
     return get_report_log_operation(get_freecad_connection(), tail)
 
@@ -716,8 +718,8 @@ def run_fem_analysis(
     The solver runs synchronously on the FreeCAD GUI thread and blocks all
     other RPC calls for its duration; do not fan out parallel requests.
 
-    Returns max von Mises stress (MPa), max/min displacement (mm), node count,
-    and the working directory CalculiX wrote to. On failure, returns the
+    Returns max and min von Mises stress (MPa), max displacement (mm), node
+    count, and the working directory CalculiX wrote to. On failure, returns the
     prerequisite-check or solver error along with the working directory for
     triage.
 

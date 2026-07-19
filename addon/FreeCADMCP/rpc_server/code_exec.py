@@ -4,6 +4,7 @@ registry backing ``execute_code`` / ``execute_code_async`` / ``get_async_status`
 GUI-free so it stays importable under ``freecadcmd`` for headless tests.
 """
 
+import re
 import threading
 import time
 import traceback
@@ -11,6 +12,19 @@ import uuid
 from typing import Any
 
 import FreeCAD
+
+# XML 1.0 forbids most control characters (everything below 0x20 except tab,
+# LF, CR). The stdlib XML-RPC marshaller does NOT strip them, so an ESC from an
+# ANSI colour code or other control byte in user output / the report log would
+# make the whole response unparseable on the client. Replace them with the
+# Unicode replacement char so text round-trips safely.
+_XML_ILLEGAL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
+
+
+def xml_safe(text: str) -> str:
+    if not isinstance(text, str):
+        return text
+    return _XML_ILLEGAL.sub("�", text)
 
 # User code executes in this dict, NOT in any server module's globals: scripts
 # assigning names like ``os`` or ``io`` must not clobber RPC internals. It
@@ -43,15 +57,15 @@ def format_exec_error(e: BaseException) -> dict[str, Any]:
     ``exec(code)`` compiles with filename ``<string>``, so those frames carry
     the line numbers of the submitted script; server-side frames are noise.
     """
-    detail: dict[str, Any] = {"success": False, "error": f"{type(e).__name__}: {e}"}
+    detail: dict[str, Any] = {"success": False, "error": xml_safe(f"{type(e).__name__}: {e}")}
     if isinstance(e, SyntaxError) and e.lineno is not None:
-        detail["traceback"] = (
+        detail["traceback"] = xml_safe(
             f'  File "<code>", line {e.lineno}\n    {(e.text or "").rstrip().lstrip()}'
         )
         return detail
     frames = traceback.extract_tb(e.__traceback__)
     user_frames = [f for f in frames if f.filename == "<string>"] or frames[-2:]
-    detail["traceback"] = "".join(traceback.format_list(user_frames)).rstrip()
+    detail["traceback"] = xml_safe("".join(traceback.format_list(user_frames)).rstrip())
     return detail
 
 
