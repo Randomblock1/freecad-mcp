@@ -158,6 +158,98 @@ check("serialize: scaffolding type ids", t_scaffolding_type_ids)
 
 
 # --------------------------------------------------------------------------
+# object_factory: actual names + recompute state
+# --------------------------------------------------------------------------
+from rpc_server.object_factory import create_object_gui  # noqa: E402
+from rpc_server.property_mapper import Object  # noqa: E402
+
+
+def t_create_returns_actual_name_on_collision():
+    first = create_object_gui("AddonTests", Object(name="DupBox", type="Part::Box"))
+    second = create_object_gui("AddonTests", Object(name="DupBox", type="Part::Box"))
+    expect(first["success"] is True, f"first create failed: {first}")
+    expect(first["object_name"] == "DupBox", f"unexpected first name: {first}")
+    expect(second["success"] is True, f"second create failed: {second}")
+    expect(second["object_name"] == "DupBox001",
+           f"expected DupBox001, got {second['object_name']}")
+    expect(second["requested_name"] == "DupBox", f"requested_name missing: {second}")
+    doc.removeObject("DupBox")
+    doc.removeObject("DupBox001")
+
+
+def t_create_invalid_cut_warns():
+    res = create_object_gui("AddonTests", Object(name="WarnCut", type="Part::Cut"))
+    expect(res["success"] is True, f"create failed outright: {res}")
+    expect("Invalid" in res.get("state", []), f"state missing Invalid: {res}")
+    expect("warning" in res, f"warning missing: {res}")
+    doc.removeObject("WarnCut")
+
+
+def t_create_unknown_doc_errors():
+    res = create_object_gui("NoSuchDoc", Object(name="X", type="Part::Box"))
+    expect(isinstance(res, str) and "not found" in res, f"expected error string: {res!r}")
+
+
+check("object_factory: name collision returns actual name", t_create_returns_actual_name_on_collision)
+check("object_factory: invalid cut warns", t_create_invalid_cut_warns)
+check("object_factory: unknown doc errors", t_create_unknown_doc_errors)
+
+
+# --------------------------------------------------------------------------
+# document_query: structured errors + detail levels
+# --------------------------------------------------------------------------
+from rpc_server.document_query import query_object, query_objects  # noqa: E402
+
+
+def t_query_objects_summary_omits_scaffolding():
+    body = doc.addObject("PartDesign::Body", "QueryBody")
+    doc.recompute()
+    res = query_objects("AddonTests", "summary")
+    expect(res["success"] is True, f"query failed: {res.get('error')}")
+    type_ids = {o.get("TypeId") for o in res["objects"]}
+    expect("App::Origin" not in type_ids, "summary should omit App::Origin")
+    expect(res.get("omitted_origin_scaffolding"), "omitted names should be listed")
+    names = {o["Name"] for o in res["objects"]}
+    expect("Box" in names and "QueryBody" in names, f"objects missing: {names}")
+    doc.removeObject(body.Name)
+
+
+def t_query_objects_full_keeps_everything():
+    body = doc.addObject("PartDesign::Body", "FullBody")
+    doc.recompute()
+    res = query_objects("AddonTests", "full")
+    type_ids = {o.get("TypeId") for o in res["objects"]}
+    expect("App::Origin" in type_ids, "full detail should keep scaffolding")
+    expect("omitted_origin_scaffolding" not in res, "full detail should omit nothing")
+    doc.removeObject(body.Name)
+
+
+def t_query_objects_unknown_doc():
+    res = query_objects("NoSuchDoc", "summary")
+    expect(res["success"] is False, "expected failure")
+    expect("AddonTests" in res["open_documents"], f"open docs missing: {res}")
+
+
+def t_query_object_unknown_object():
+    res = query_object("AddonTests", "Bxo")
+    expect(res["success"] is False, "expected failure")
+    expect("Box" in res["available_objects"], f"available missing Box: {res}")
+
+
+def t_query_object_success():
+    res = query_object("AddonTests", "Box")
+    expect(res["success"] is True, f"failed: {res}")
+    expect(res["object"]["Name"] == "Box", f"bad object: {res['object'].get('Name')}")
+
+
+check("document_query: summary omits scaffolding", t_query_objects_summary_omits_scaffolding)
+check("document_query: full keeps everything", t_query_objects_full_keeps_everything)
+check("document_query: unknown doc error", t_query_objects_unknown_doc)
+check("document_query: unknown object error", t_query_object_unknown_object)
+check("document_query: object success", t_query_object_success)
+
+
+# --------------------------------------------------------------------------
 # result
 # --------------------------------------------------------------------------
 # freecadcmd exits 0 even when the script raises, so callers must grep for

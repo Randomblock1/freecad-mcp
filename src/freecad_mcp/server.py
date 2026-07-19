@@ -489,6 +489,7 @@ def get_objects(
     doc_name: str,
     include_screenshot: bool = True,
     view_name: ViewName = "Isometric",
+    detail: Literal["summary", "full"] = "summary",
 ) -> list[TextContent | ImageContent]:
     """Get all objects in a document.
     You can use this tool to get the objects in a document to see what you can check or edit.
@@ -498,9 +499,13 @@ def get_objects(
         include_screenshot: Whether to return a screenshot of the document (default True).
             Set to False to save tokens when only the object data is needed.
         view_name: The view orientation of the returned screenshot (default "Isometric").
+        detail: "summary" (default) returns Name/TypeId/State/shape validity/Volume/
+            BoundBox/non-identity Placement per object and omits PartDesign Origin
+            scaffolding (omitted names are listed). "full" returns every property of
+            every object. Use get_object for full detail on a single object.
 
     Returns:
-        A list of objects in the document and a screenshot of the document.
+        Objects in the document (summary or full detail) and a screenshot of the document.
     """
     return get_objects_operation(
         get_freecad_connection(),
@@ -508,6 +513,7 @@ def get_objects(
         doc_name,
         include_screenshot,
         view_name,
+        detail,
     )
 
 

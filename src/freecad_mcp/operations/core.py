@@ -11,11 +11,30 @@ from ..responses import ToolResponse, add_screenshot_if_available, json_response
 logger = logging.getLogger("FreeCADMCPserver")
 
 
+def _assigned_name_note(actual: str, requested: str | None) -> str:
+    if requested is None or actual == requested:
+        return ""
+    return (
+        f" (requested '{requested}'; FreeCAD assigned '{actual}' — "
+        f"use '{actual}' in subsequent calls)"
+    )
+
+
+def _state_warning_suffix(res: dict[str, Any]) -> str:
+    if res.get("warning"):
+        return f"\nWARNING: {res['warning']}"
+    return ""
+
+
 def create_document_operation(freecad: FreeCADConnection, name: str) -> ToolResponse:
     try:
         res = freecad.create_document(name)
         if res["success"]:
-            return text_response(f"Document '{res['document_name']}' created successfully")
+            actual = res["document_name"]
+            return text_response(
+                f"Document '{actual}' created successfully"
+                + _assigned_name_note(actual, res.get("requested_name", name))
+            )
         return text_response(f"Failed to create document: {res['error']}")
     except Exception as e:
         logger.error(f"Failed to create document: {str(e)}")
@@ -42,7 +61,12 @@ def create_object_operation(
         }
         res = freecad.create_object(doc_name, obj_data)
         if res["success"]:
-            response = text_response(f"Object '{res['object_name']}' created successfully")
+            actual = res["object_name"]
+            response = text_response(
+                f"Object '{actual}' created successfully"
+                + _assigned_name_note(actual, res.get("requested_name", obj_name))
+                + _state_warning_suffix(res)
+            )
         else:
             return text_response(f"Failed to create object: {res['error']}")
         skip_screenshot = only_text_feedback or not include_screenshot
@@ -65,7 +89,10 @@ def edit_object_operation(
     try:
         res = freecad.edit_object(doc_name, obj_name, {"Properties": obj_properties})
         if res["success"]:
-            response = text_response(f"Object '{res['object_name']}' edited successfully")
+            response = text_response(
+                f"Object '{res['object_name']}' edited successfully"
+                + _state_warning_suffix(res)
+            )
         else:
             return text_response(f"Failed to edit object: {res['error']}")
         skip_screenshot = only_text_feedback or not include_screenshot
@@ -226,15 +253,29 @@ def insert_part_from_library_operation(
         return text_response(f"Failed to insert part from library: {str(e)}")
 
 
+def _lookup_error_response(res: dict[str, Any], context: str) -> ToolResponse:
+    """Failed lookup: name what *is* available, and skip the screenshot."""
+    parts = [f"Failed to {context}: {res.get('error', 'unknown error')}"]
+    if res.get("open_documents") is not None:
+        parts.append(f"Open documents: {res['open_documents']}")
+    if res.get("available_objects") is not None:
+        parts.append(f"Available objects: {res['available_objects']}")
+    return text_response(" ".join(parts))
+
+
 def get_objects_operation(
     freecad: FreeCADConnection,
     only_text_feedback: bool,
     doc_name: str,
     include_screenshot: bool = True,
     view_name: str = "Isometric",
+    detail: str = "summary",
 ) -> ToolResponse:
     try:
-        response = json_response(freecad.get_objects(doc_name))
+        res = freecad.get_objects(doc_name, detail)
+        if isinstance(res, dict) and res.get("success") is False:
+            return _lookup_error_response(res, "get objects")
+        response = json_response(res)
         skip_screenshot = only_text_feedback or not include_screenshot
         screenshot = None if skip_screenshot else freecad.get_active_screenshot(view_name)
         return add_screenshot_if_available(response, screenshot, skip_screenshot)
@@ -252,7 +293,10 @@ def get_object_operation(
     view_name: str = "Isometric",
 ) -> ToolResponse:
     try:
-        response = json_response(freecad.get_object(doc_name, obj_name))
+        res = freecad.get_object(doc_name, obj_name)
+        if isinstance(res, dict) and res.get("success") is False:
+            return _lookup_error_response(res, "get object")
+        response = json_response(res)
         skip_screenshot = only_text_feedback or not include_screenshot
         screenshot = None if skip_screenshot else freecad.get_active_screenshot(view_name)
         return add_screenshot_if_available(response, screenshot, skip_screenshot)

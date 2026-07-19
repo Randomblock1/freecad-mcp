@@ -84,8 +84,8 @@ class FreeCADConnection:
             logger.error(f"Error getting screenshot: {e}")
             return None
 
-    def get_objects(self, doc_name: str) -> list[dict[str, Any]]:
-        return self.server.get_objects(doc_name)
+    def get_objects(self, doc_name: str, detail: str = "summary") -> dict[str, Any]:
+        return self.server.get_objects(doc_name, detail)
 
     def get_object(self, doc_name: str, obj_name: str) -> dict[str, Any]:
         return self.server.get_object(doc_name, obj_name)

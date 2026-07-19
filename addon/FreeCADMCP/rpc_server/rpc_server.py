@@ -20,11 +20,11 @@ from rpc_server.gui_dispatch import (
     process_gui_tasks,
     request_shutdown,
 )
+from rpc_server.document_query import query_object, query_objects
 from rpc_server.ip_filter import FilteredXMLRPCServer, validate_allowed_ips
-from rpc_server.object_factory import create_object_gui
+from rpc_server.object_factory import create_object_gui, recompute_state_warning
 from rpc_server.parts_library import get_parts_list, insert_part_from_library
 from rpc_server.property_mapper import Object, set_object_property
-from rpc_server.serialize import serialize_object
 from rpc_server.settings import load_settings, save_settings
 from rpc_server.view_manager import save_active_screenshot
 
@@ -35,6 +35,11 @@ rpc_server_instance = None
 def _ok(res) -> bool:
     """True when a GUI-thread handler returned success."""
     return res is True
+
+
+def _ok_dict(res) -> bool:
+    """True when a GUI-thread handler returned a structured success dict."""
+    return isinstance(res, dict) and bool(res.get("success"))
 
 
 def _err(res) -> dict:
@@ -54,8 +59,8 @@ class FreeCADRPC:
 
     def create_document(self, name="New_Document"):
         res = dispatch_to_gui(lambda: self._create_document_gui(name))
-        if _ok(res):
-            return {"success": True, "document_name": name}
+        if _ok_dict(res):
+            return res
         return _err(res)
 
     def create_object(self, doc_name, obj_data: dict[str, Any]):
@@ -66,8 +71,8 @@ class FreeCADRPC:
             properties=obj_data.get("Properties", {}),
         )
         res = dispatch_to_gui(lambda: self._create_object_gui(doc_name, obj))
-        if _ok(res):
-            return {"success": True, "object_name": obj.name}
+        if _ok_dict(res):
+            return res
         return _err(res)
 
     def edit_object(self, doc_name: str, obj_name: str, properties: dict[str, Any]) -> dict[str, Any]:
@@ -76,8 +81,8 @@ class FreeCADRPC:
             properties=properties.get("Properties", {}),
         )
         res = dispatch_to_gui(lambda: self._edit_object_gui(doc_name, obj))
-        if _ok(res):
-            return {"success": True, "object_name": obj.name}
+        if _ok_dict(res):
+            return res
         return _err(res)
 
     def delete_object(self, doc_name: str, obj_name: str):
@@ -175,24 +180,11 @@ class FreeCADRPC:
         )
         return _err(res)
 
-    def get_objects(self, doc_name):
-        # FreeCAD.getDocument raises (not returns None) for an unknown name.
-        try:
-            doc = FreeCAD.getDocument(doc_name)
-        except Exception:
-            return []
-        return [serialize_object(obj) for obj in doc.Objects]
+    def get_objects(self, doc_name, detail="summary"):
+        return query_objects(doc_name, detail)
 
     def get_object(self, doc_name, obj_name):
-        # FreeCAD.getDocument raises (not returns None) for an unknown name.
-        try:
-            doc = FreeCAD.getDocument(doc_name)
-        except Exception:
-            return None
-        obj = doc.getObject(obj_name)
-        if obj:
-            return serialize_object(obj)
-        return None
+        return query_object(doc_name, obj_name)
 
     def insert_part_from_library(self, relative_path):
         res = dispatch_to_gui(lambda: self._insert_part_from_library(relative_path))
@@ -250,8 +242,10 @@ class FreeCADRPC:
     def _create_document_gui(self, name):
         doc = FreeCAD.newDocument(name)
         doc.recompute()
-        FreeCAD.Console.PrintMessage(f"Document '{name}' created via RPC.\n")
-        return True
+        FreeCAD.Console.PrintMessage(f"Document '{doc.Name}' created via RPC.\n")
+        # doc.Name is what FreeCAD actually assigned (sanitized, deduplicated);
+        # reporting the requested name instead would corrupt the caller's model.
+        return {"success": True, "document_name": doc.Name, "requested_name": name}
 
     def _create_object_gui(self, doc_name, obj: Object):
         return create_object_gui(doc_name, obj)
@@ -272,7 +266,11 @@ class FreeCADRPC:
             set_object_property(doc, obj_ins, obj.properties)
             doc.recompute()
             FreeCAD.Console.PrintMessage(f"Object '{obj.name}' updated via RPC.\n")
-            return True
+            return {
+                "success": True,
+                "object_name": obj_ins.Name,
+                **recompute_state_warning(obj_ins),
+            }
         except Exception as e:
             return str(e)
 
