@@ -31,12 +31,24 @@ def _get_view_size(view: Any) -> tuple[int, int]:
         return 1024, 768
 
 
+# Default screenshots follow the viewport, which on large displays produces
+# ~1000+ px images costing ~1500 image tokens each. Cap the default at 800 px
+# on the longest edge (~59% cheaper); explicit width/height always win.
+DEFAULT_MAX_EDGE = 800
+
+
 def _resolve_screenshot_size(
     view: Any,
     width: int | None,
     height: int | None,
 ) -> tuple[int, int]:
     view_width, view_height = _get_view_size(view)
+    if width is None and height is None:
+        longest = max(view_width, view_height)
+        if longest > DEFAULT_MAX_EDGE:
+            scale = DEFAULT_MAX_EDGE / longest
+            return max(1, round(view_width * scale)), max(1, round(view_height * scale))
+        return view_width, view_height
     resolved_width = view_width if width is None else max(1, int(width))
     resolved_height = view_height if height is None else max(1, int(height))
     return resolved_width, resolved_height

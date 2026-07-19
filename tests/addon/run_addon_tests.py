@@ -53,7 +53,14 @@ from rpc_server.serialize import (  # noqa: E402
     summarize_object,
 )
 
+# freecadcmd re-executes the script after an uncaught exception, which would
+# leave a stale "AddonTests" document and silently misdirect name-based
+# lookups; close leftovers and always address the doc by its actual name.
+for _stale in list(FreeCAD.listDocuments()):
+    if _stale.startswith("AddonTests"):
+        FreeCAD.closeDocument(_stale)
 doc = FreeCAD.newDocument("AddonTests")
+DOC = doc.Name
 
 box = doc.addObject("Part::Box", "Box")
 box.Length = 10
@@ -165,8 +172,8 @@ from rpc_server.property_mapper import Object  # noqa: E402
 
 
 def t_create_returns_actual_name_on_collision():
-    first = create_object_gui("AddonTests", Object(name="DupBox", type="Part::Box"))
-    second = create_object_gui("AddonTests", Object(name="DupBox", type="Part::Box"))
+    first = create_object_gui(DOC, Object(name="DupBox", type="Part::Box"))
+    second = create_object_gui(DOC, Object(name="DupBox", type="Part::Box"))
     expect(first["success"] is True, f"first create failed: {first}")
     expect(first["object_name"] == "DupBox", f"unexpected first name: {first}")
     expect(second["success"] is True, f"second create failed: {second}")
@@ -178,7 +185,7 @@ def t_create_returns_actual_name_on_collision():
 
 
 def t_create_invalid_cut_warns():
-    res = create_object_gui("AddonTests", Object(name="WarnCut", type="Part::Cut"))
+    res = create_object_gui(DOC, Object(name="WarnCut", type="Part::Cut"))
     expect(res["success"] is True, f"create failed outright: {res}")
     expect("Invalid" in res.get("state", []), f"state missing Invalid: {res}")
     expect("warning" in res, f"warning missing: {res}")
@@ -204,7 +211,7 @@ from rpc_server.document_query import query_object, query_objects  # noqa: E402
 def t_query_objects_summary_omits_scaffolding():
     body = doc.addObject("PartDesign::Body", "QueryBody")
     doc.recompute()
-    res = query_objects("AddonTests", "summary")
+    res = query_objects(DOC, "summary")
     expect(res["success"] is True, f"query failed: {res.get('error')}")
     type_ids = {o.get("TypeId") for o in res["objects"]}
     expect("App::Origin" not in type_ids, "summary should omit App::Origin")
@@ -217,7 +224,7 @@ def t_query_objects_summary_omits_scaffolding():
 def t_query_objects_full_keeps_everything():
     body = doc.addObject("PartDesign::Body", "FullBody")
     doc.recompute()
-    res = query_objects("AddonTests", "full")
+    res = query_objects(DOC, "full")
     type_ids = {o.get("TypeId") for o in res["objects"]}
     expect("App::Origin" in type_ids, "full detail should keep scaffolding")
     expect("omitted_origin_scaffolding" not in res, "full detail should omit nothing")
@@ -227,17 +234,17 @@ def t_query_objects_full_keeps_everything():
 def t_query_objects_unknown_doc():
     res = query_objects("NoSuchDoc", "summary")
     expect(res["success"] is False, "expected failure")
-    expect("AddonTests" in res["open_documents"], f"open docs missing: {res}")
+    expect(DOC in res["open_documents"], f"open docs missing: {res}")
 
 
 def t_query_object_unknown_object():
-    res = query_object("AddonTests", "Bxo")
+    res = query_object(DOC, "Bxo")
     expect(res["success"] is False, "expected failure")
     expect("Box" in res["available_objects"], f"available missing Box: {res}")
 
 
 def t_query_object_success():
-    res = query_object("AddonTests", "Box")
+    res = query_object(DOC, "Box")
     expect(res["success"] is True, f"failed: {res}")
     expect(res["object"]["Name"] == "Box", f"bad object: {res['object'].get('Name')}")
 
@@ -319,6 +326,43 @@ check("code_exec: namespace persists and preloads", t_namespace_persists_and_pre
 check("code_exec: runtime error formatted with line", t_format_runtime_error_has_line)
 check("code_exec: syntax error formatted with line", t_format_syntax_error_has_line)
 check("code_exec: async registry lifecycle", t_async_registry_lifecycle)
+
+
+# --------------------------------------------------------------------------
+# view_manager: default screenshot size cap
+# --------------------------------------------------------------------------
+from rpc_server.view_manager import DEFAULT_MAX_EDGE, _resolve_screenshot_size  # noqa: E402
+
+
+class _StubView:
+    def __init__(self, w, h):
+        self._size = (w, h)
+
+    def getSize(self):
+        return self._size
+
+
+def t_screenshot_default_capped():
+    w, h = _resolve_screenshot_size(_StubView(1014, 1159), None, None)
+    expect(max(w, h) == DEFAULT_MAX_EDGE, f"longest edge should be {DEFAULT_MAX_EDGE}: {(w, h)}")
+    expect((w, h) == (700, 800), f"expected (700, 800), got {(w, h)}")
+
+
+def t_screenshot_small_viewport_untouched():
+    expect(_resolve_screenshot_size(_StubView(640, 480), None, None) == (640, 480),
+           "small viewport should pass through")
+
+
+def t_screenshot_explicit_size_honored():
+    expect(_resolve_screenshot_size(_StubView(1014, 1159), 1600, 1200) == (1600, 1200),
+           "explicit size must be honored uncapped")
+    expect(_resolve_screenshot_size(_StubView(1014, 1159), None, 400) == (1014, 400),
+           "partial explicit size keeps viewport for the other dimension")
+
+
+check("view_manager: default screenshot capped at 800", t_screenshot_default_capped)
+check("view_manager: small viewport untouched", t_screenshot_small_viewport_untouched)
+check("view_manager: explicit size honored", t_screenshot_explicit_size_honored)
 
 
 # --------------------------------------------------------------------------

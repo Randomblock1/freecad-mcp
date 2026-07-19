@@ -10,7 +10,9 @@ def text_response(message: str) -> ToolResponse:
 
 
 def json_response(data: object) -> ToolResponse:
-    return text_response(json.dumps(data, ensure_ascii=False, indent=2, default=str))
+    # Compact separators: indent=2 measured as a flat ~42% token tax on every
+    # JSON payload, and agents don't need pretty-printing.
+    return text_response(json.dumps(data, ensure_ascii=False, separators=(",", ":"), default=str))
 
 
 def add_screenshot_if_available(

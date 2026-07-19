@@ -469,8 +469,10 @@ def get_view(
         - "Bottom"
         - "Dimetric"
         - "Trimetric"
-        width: The width of the screenshot in pixels. If not specified, uses the viewport width.
-        height: The height of the screenshot in pixels. If not specified, uses the viewport height.
+        width: The width of the screenshot in pixels. When width and height are both
+            omitted, the viewport size is used, downscaled so the longest edge is at
+            most 800 px (token economy). Pass explicit values for full resolution.
+        height: The height of the screenshot in pixels (see width).
         focus_object: The name of the object to focus on. If not specified, fits all objects in the view.
 
     Returns:
