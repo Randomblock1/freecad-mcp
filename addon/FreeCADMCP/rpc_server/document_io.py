@@ -67,10 +67,35 @@ def _default_export_objects(doc) -> list:
     return picked
 
 
+def _export_mesh_with_deflection(objects, path, linear_deflection):
+    """Tessellate each object's shape at a chosen tolerance and export as one mesh.
+
+    MeshPart.meshFromShape lets the caller trade file size for surface fidelity;
+    the plain Mesh.export path uses FreeCAD's default tessellation.
+    """
+    import Mesh
+    import MeshPart
+
+    meshes = []
+    for obj in objects:
+        shape = getattr(obj, "Shape", None)
+        if shape is None or shape.isNull():
+            continue
+        m = MeshPart.meshFromShape(Shape=shape, LinearDeflection=float(linear_deflection))
+        meshes.append(Mesh.Mesh(m.Topology))
+    if not meshes:
+        raise ValueError("no objects with tessellatable geometry to mesh")
+    combined = meshes[0]
+    for extra in meshes[1:]:
+        combined.addMesh(extra)
+    combined.write(path)
+
+
 def export_document(
     doc_name: str,
     file_path: str,
     object_names: list[str] | None = None,
+    linear_deflection: float | None = None,
 ) -> dict:
     try:
         doc = FreeCAD.getDocument(doc_name)
@@ -103,19 +128,27 @@ def export_document(
 
     path = os.path.abspath(os.path.expanduser(file_path))
     suffix = os.path.splitext(path)[1].lower()
+    note = None
     try:
         if suffix in _CAD_FORMATS:
             import Import
 
             Import.export(objects, path)
+            if linear_deflection is not None:
+                note = "linear_deflection ignored: it only affects tessellated mesh formats, not exact CAD (STEP/IGES)."
         elif suffix == ".brep":
             import Part
 
             Part.export(objects, path)
+            if linear_deflection is not None:
+                note = "linear_deflection ignored: BREP is an exact format, not a tessellated mesh."
         elif suffix in _MESH_FORMATS:
-            import Mesh
+            if linear_deflection is not None:
+                _export_mesh_with_deflection(objects, path, linear_deflection)
+            else:
+                import Mesh
 
-            Mesh.export(objects, path)
+                Mesh.export(objects, path)
         else:
             return {
                 "success": False,
@@ -126,7 +159,7 @@ def export_document(
             }
         if not os.path.exists(path):
             return {"success": False, "error": f"Export produced no file at {path!r}."}
-        return {
+        result = {
             "success": True,
             "file_path": path,
             # float, not int: XML-RPC <int> is limited to +/-2^31, and a finely
@@ -135,5 +168,8 @@ def export_document(
             "file_size_bytes": float(os.path.getsize(path)),
             "exported_objects": [o.Name for o in objects],
         }
+        if note:
+            result["note"] = note
+        return result
     except Exception as e:
         return {"success": False, "error": f"{type(e).__name__}: {e}"}

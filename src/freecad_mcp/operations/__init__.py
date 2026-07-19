@@ -1,4 +1,5 @@
 from .core import (
+    check_printability_operation,
     create_document_operation,
     create_object_operation,
     delete_object_operation,
@@ -12,7 +13,9 @@ from .core import (
     get_objects_operation,
     get_parts_list_operation,
     get_report_log_operation,
+    get_section_view_operation,
     get_topology_operation,
+    get_views_operation,
     get_view_operation,
     insert_part_from_library_operation,
     list_documents_operation,
@@ -23,6 +26,7 @@ from .core import (
 )
 
 __all__ = [
+    "check_printability_operation",
     "create_document_operation",
     "create_object_operation",
     "delete_object_operation",
@@ -36,7 +40,9 @@ __all__ = [
     "get_objects_operation",
     "get_parts_list_operation",
     "get_report_log_operation",
+    "get_section_view_operation",
     "get_topology_operation",
+    "get_views_operation",
     "get_view_operation",
     "insert_part_from_library_operation",
     "list_documents_operation",

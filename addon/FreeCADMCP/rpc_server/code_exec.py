@@ -4,6 +4,7 @@ registry backing ``execute_code`` / ``execute_code_async`` / ``get_async_status`
 GUI-free so it stays importable under ``freecadcmd`` for headless tests.
 """
 
+import contextlib
 import re
 import threading
 import time
@@ -32,6 +33,31 @@ def xml_safe(text: str) -> str:
 # in one execute_code call remain available to later calls (and to
 # execute_code_async workers, which share it).
 _EXEC_NAMESPACE: dict[str, Any] = {}
+
+
+@contextlib.contextmanager
+def rollback_documents():
+    """Roll back every document change made inside the block (dry-run).
+
+    Opens an undo transaction on each currently-open document and aborts it on
+    exit, so object creations/edits/deletions are reverted; documents created
+    inside the block are closed. Only DOCUMENT state rolls back — file writes
+    (save/export) and exec-namespace variables persist.
+    """
+    docs_before = set(FreeCAD.listDocuments().keys())
+    for name in docs_before:
+        d = FreeCAD.getDocument(name)
+        d.UndoMode = 1  # freecadcmd docs may start with undo disabled
+        d.openTransaction("MCP dry-run")
+    try:
+        yield
+    finally:
+        for name in docs_before:
+            if name in FreeCAD.listDocuments():
+                FreeCAD.getDocument(name).abortTransaction()
+        for name in list(FreeCAD.listDocuments().keys()):
+            if name not in docs_before:
+                FreeCAD.closeDocument(name)
 
 
 def exec_namespace() -> dict[str, Any]:

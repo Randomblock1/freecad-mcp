@@ -16,6 +16,7 @@ from rpc_server.code_exec import (
     complete_async_job,
     exec_namespace,
     format_exec_error,
+    rollback_documents,
     start_async_job,
     xml_safe,
 )
@@ -31,6 +32,7 @@ from rpc_server.gui_dispatch import (
 from rpc_server.document_io import export_document as _export_document
 from rpc_server.document_io import save_document as _save_document
 from rpc_server.document_query import query_object, query_objects
+from rpc_server.geometry_tools import check_printability as _check_printability
 from rpc_server.geometry_tools import get_topology as _get_topology
 from rpc_server.geometry_tools import measure_distance as _measure_distance
 from rpc_server.ip_filter import FilteredXMLRPCServer, validate_allowed_ips
@@ -38,7 +40,7 @@ from rpc_server.object_factory import create_object_gui, recompute_state_warning
 from rpc_server.parts_library import get_parts_list, insert_part_from_library
 from rpc_server.property_mapper import Object, set_object_property
 from rpc_server.settings import load_settings, save_settings
-from rpc_server.view_manager import save_active_screenshot
+from rpc_server.view_manager import save_active_screenshot, save_section_screenshot
 
 rpc_server_thread = None
 rpc_server_instance = None
@@ -178,13 +180,17 @@ class FreeCADRPC:
         """Status of one background job (or all jobs when job_id is None)."""
         return async_job_status(job_id)
 
-    def execute_code(self, code: str) -> dict[str, Any]:
+    def execute_code(self, code: str, dry_run: bool = False) -> dict[str, Any]:
         """Execute Python code on the GUI thread and wait for the result.
 
         Runs on the GUI thread so that FreeCAD document operations
         (addObject, recompute, save) are safe and correctly ordered.
         Use execute_code_async for heavy OCCT boolean ops (fuse/cut)
         that would block the GUI thread too long.
+
+        When dry_run is True, all document changes are rolled back after the
+        code runs (see rollback_documents): the code executes and its output /
+        errors are returned, but the document tree is left untouched.
 
         On failure, returns the exception, the traceback frames pointing into
         the submitted code (line numbers refer to the submitted string), and
@@ -194,8 +200,13 @@ class FreeCADRPC:
 
         def task():
             try:
-                with contextlib.redirect_stdout(output_buffer):
-                    exec(code, exec_namespace())
+                if dry_run:
+                    with rollback_documents():
+                        with contextlib.redirect_stdout(output_buffer):
+                            exec(code, exec_namespace())
+                else:
+                    with contextlib.redirect_stdout(output_buffer):
+                        exec(code, exec_namespace())
                 return True
             except Exception as e:
                 return {**format_exec_error(e), "stdout": xml_safe(output_buffer.getvalue())}
@@ -203,10 +214,13 @@ class FreeCADRPC:
         res = dispatch_to_gui(task, timeout=self.EXECUTE_CODE_TIMEOUT)
         if _ok(res):
             FreeCAD.Console.PrintMessage("Python code executed successfully.\n")
+            prefix = "Python code executed successfully"
+            if dry_run:
+                prefix += " (dry run — all document changes rolled back)"
             return {
                 "success": True,
-                "message": "Python code executed successfully.\nOutput: "
-                + xml_safe(output_buffer.getvalue()),
+                "dry_run": dry_run,
+                "message": prefix + ".\nOutput: " + xml_safe(output_buffer.getvalue()),
             }
         # Log the offending code (truncated) to make errors traceable
         code_preview = code if len(code) <= 800 else code[:800] + "\n...(truncated)"
@@ -231,16 +245,22 @@ class FreeCADRPC:
         """Read-only topology breakdown; safe on the RPC thread."""
         return _get_topology(doc_name, obj_name, include_edges)
 
+    def check_printability(self, doc_name, obj_name, min_wall_thickness=None,
+                           include_overhangs=False, build_direction="Z", max_overhang_deg=45.0):
+        """Read-only print-readiness analysis; safe on the RPC thread."""
+        return _check_printability(doc_name, obj_name, min_wall_thickness,
+                                   include_overhangs, build_direction, max_overhang_deg)
+
     def save_document(self, doc_name, file_path=None):
         res = dispatch_to_gui(lambda: _save_document(doc_name, file_path))
         if _ok_dict(res):
             return res
         return _err(res)
 
-    def export_document(self, doc_name, file_path, object_names=None):
+    def export_document(self, doc_name, file_path, object_names=None, linear_deflection=None):
         # Meshing/STEP-writing large models can be slow; allow a longer wait.
         res = dispatch_to_gui(
-            lambda: _export_document(doc_name, file_path, object_names),
+            lambda: _export_document(doc_name, file_path, object_names, linear_deflection),
             timeout=300,
         )
         if _ok_dict(res):
@@ -334,6 +354,41 @@ class FreeCADRPC:
                 return None
             FreeCAD.Console.PrintWarning(f"MCP RPC: screenshot failed: {res}\n")
             return None
+        finally:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+
+    def get_section_screenshot(
+        self,
+        doc_name,
+        plane="XZ",
+        offset=None,
+        object_names=None,
+        view_name="Isometric",
+        width=None,
+        height=None,
+    ):
+        """Cutaway screenshot: temporarily cut away the +normal half at the plane.
+
+        All temporary changes are rolled back before returning. Returns
+        {"success": True, "image": <base64 png>} or {"success": False, "error": ...}.
+        """
+        fd, tmp_path = tempfile.mkstemp(suffix=".png")
+        os.close(fd)
+
+        def task():
+            return save_section_screenshot(
+                tmp_path, doc_name, plane, offset, object_names, view_name, width, height
+            )
+
+        try:
+            # The temporary boolean cut can be slow on large models.
+            res = dispatch_to_gui(task, timeout=120)
+            if _ok(res):
+                with open(tmp_path, "rb") as f:
+                    return {"success": True, "image": base64.b64encode(f.read()).decode("utf-8")}
+            err = res.get("error", str(res)) if isinstance(res, dict) else str(res)
+            return {"success": False, "error": err}
         finally:
             if os.path.exists(tmp_path):
                 os.remove(tmp_path)

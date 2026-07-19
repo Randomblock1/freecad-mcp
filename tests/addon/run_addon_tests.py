@@ -69,11 +69,17 @@ try:
         complete_async_job,
         exec_namespace,
         format_exec_error,
+        rollback_documents,
         start_async_job,
         xml_safe,
     )
     from rpc_server.view_manager import DEFAULT_MAX_EDGE, _resolve_screenshot_size  # noqa: E402
-    from rpc_server.geometry_tools import get_topology, measure_distance  # noqa: E402
+    from rpc_server.geometry_tools import (  # noqa: E402
+        check_printability,
+        get_topology,
+        measure_distance,
+        section_shape,
+    )
     from rpc_server.document_io import export_document, save_document  # noqa: E402
     import rpc_server.code_exec as _code_exec  # noqa: E402  # for isolation check
 
@@ -380,11 +386,33 @@ def t_xml_safe_strips_control_chars():
     expect("redtext" not in out, "expected replacement char between segments")
 
 
+def t_rollback_reverts_edits_and_new_objects():
+    # Edit an existing object and add a new one inside the block; both revert.
+    box.Length = 10
+    doc.recompute()
+    with rollback_documents():
+        box.Length = 999
+        doc.addObject("Part::Box", "RollbackTmp")
+        doc.recompute()
+    expect(abs(box.Length.Value - 10) < 1e-9, f"edit not rolled back: Length={box.Length}")
+    expect(doc.getObject("RollbackTmp") is None, "added object not rolled back")
+
+
+def t_rollback_closes_new_documents():
+    before = set(FreeCAD.listDocuments())
+    with rollback_documents():
+        FreeCAD.newDocument("RollbackScratch")
+        expect("RollbackScratch" in FreeCAD.listDocuments(), "scratch doc not created")
+    expect(set(FreeCAD.listDocuments()) == before, "new document not closed on rollback")
+
+
 check("code_exec: namespace persists and preloads", t_namespace_persists_and_preloads)
 check("code_exec: runtime error formatted with line", t_format_runtime_error_has_line)
 check("code_exec: syntax error formatted with line", t_format_syntax_error_has_line)
 check("code_exec: SystemExit formats as failure", t_format_system_exit_is_failure)
 check("code_exec: xml_safe strips control chars", t_xml_safe_strips_control_chars)
+check("code_exec: rollback reverts edits + new objects", t_rollback_reverts_edits_and_new_objects)
+check("code_exec: rollback closes new documents", t_rollback_closes_new_documents)
 check("code_exec: async registry lifecycle", t_async_registry_lifecycle)
 
 
@@ -514,7 +542,79 @@ check("geometry: sub-element distance + bad sub error", t_measure_distance_sub_e
 check("geometry: unknown object error", t_measure_distance_unknown_object)
 check("geometry: topology of box", t_topology_of_box)
 check("geometry: topology unknown object", t_topology_unknown_object)
+def t_section_shape_removes_half():
+    import Part
+
+    box = Part.makeBox(10, 10, 10)
+    # XY plane at z=5 removes the z>5 half -> volume 500, bbox z in [0,5]
+    sec = section_shape(box, "XY", 5.0)
+    expect(abs(sec.Volume - 500.0) < 1e-6, f"expected 500 mm3, got {sec.Volume}")
+    expect(abs(sec.BoundBox.ZMax - 5.0) < 1e-6, f"ZMax should be 5, got {sec.BoundBox.ZMax}")
+    # default offset = center along normal -> also half
+    sec2 = section_shape(box, "YZ", None)
+    expect(abs(sec2.Volume - 500.0) < 1e-6, f"default-offset YZ expected 500, got {sec2.Volume}")
+
+
+def t_printability_hollow_box_wall_thickness():
+    import Part
+
+    outer = doc.addObject("Part::Feature", "Hollow")
+    outer.Shape = Part.makeBox(20, 20, 20).cut(
+        Part.makeBox(16, 16, 16, FreeCAD.Vector(2, 2, 2))
+    )
+    doc.recompute()
+    res = check_printability(DOC, "Hollow", min_wall_thickness=3.0)
+    expect(res["success"] is True, f"failed: {res}")
+    expect(res["manifold"]["is_solid"] and res["manifold"]["is_watertight"],
+           f"hollow box should be a watertight solid: {res['manifold']}")
+    wt = res["wall_thickness"]
+    expect(abs(wt["min_mm"] - 2.0) < 0.3, f"min wall ~2 expected, got {wt['min_mm']}")
+    expect(wt["below_threshold"] is True, f"2mm wall should be below 3mm threshold: {wt}")
+    expect("overhangs" not in res, "overhangs must be opt-in (absent by default)")
+    doc.removeObject("Hollow")
+
+
+def t_printability_open_shell_not_watertight():
+    import Part
+
+    shell = doc.addObject("Part::Feature", "OpenShell")
+    shell.Shape = Part.makeBox(10, 10, 10).Faces[0]  # a single face, not closed
+    doc.recompute()
+    res = check_printability(DOC, "OpenShell")
+    expect(res["success"] is True, f"failed: {res}")
+    expect(res["manifold"]["is_watertight"] is False, "single face is not watertight")
+    expect(res["manifold"]["is_solid"] is False, "single face is not a solid")
+    doc.removeObject("OpenShell")
+
+
+def t_printability_overhang_opt_in():
+    import Part
+
+    # Base on the plate + a floating slab whose underside is a real overhang.
+    base = Part.makeBox(20, 20, 4)
+    slab = Part.makeBox(20, 20, 4, FreeCAD.Vector(0, 0, 10))
+    comp = doc.addObject("Part::Feature", "Cantilever")
+    comp.Shape = Part.makeCompound([base, slab])
+    doc.recompute()
+    res = check_printability(DOC, "Cantilever", include_overhangs=True, max_overhang_deg=45)
+    expect("overhangs" in res, "overhangs should be present when include_overhangs=True")
+    oh = res["overhangs"]
+    expect(oh["count"] >= 1, f"expected at least one overhang face, got {oh}")
+    expect(oh["worst_angle_deg"] > 45, f"worst overhang should exceed 45deg: {oh}")
+    doc.removeObject("Cantilever")
+
+
+def t_printability_unknown_object():
+    res = check_printability(DOC, "Nope")
+    expect(res["success"] is False and "Box" in res["error"], f"bad error: {res}")
+
+
 check("geometry: sphere degenerate edges survive", t_topology_sphere_degenerate_edges)
+check("geometry: section_shape removes half", t_section_shape_removes_half)
+check("geometry: printability hollow-box wall thickness", t_printability_hollow_box_wall_thickness)
+check("geometry: printability open shell not watertight", t_printability_open_shell_not_watertight)
+check("geometry: printability overhang opt-in", t_printability_overhang_opt_in)
+check("geometry: printability unknown object", t_printability_unknown_object)
 
 
 # --------------------------------------------------------------------------
@@ -563,12 +663,39 @@ def t_export_unknown_object():
     expect(res["success"] is False and "Box" in res["error"], f"bad error: {res}")
 
 
+def t_export_mesh_deflection_controls_size():
+    # Finer linear_deflection => more triangles => larger STL, on a curved shape.
+    import Part
+
+    cyl = doc.addObject("Part::Feature", "DefCyl")
+    cyl.Shape = Part.makeCylinder(5, 10)
+    doc.recompute()
+    coarse = os.path.join(_tmpdir, "cyl_coarse.stl")
+    fine = os.path.join(_tmpdir, "cyl_fine.stl")
+    rc = export_document(DOC, coarse, ["DefCyl"], linear_deflection=2.0)
+    rf = export_document(DOC, fine, ["DefCyl"], linear_deflection=0.05)
+    expect(rc["success"] and rf["success"], f"export failed: {rc}, {rf}")
+    expect(os.path.getsize(fine) > os.path.getsize(coarse),
+           f"fine STL ({os.path.getsize(fine)}) not larger than coarse ({os.path.getsize(coarse)})")
+    doc.removeObject("DefCyl")
+
+
+def t_export_deflection_ignored_for_cad():
+    res = export_document(DOC, os.path.join(_tmpdir, "box_defl.step"), ["Box"],
+                          linear_deflection=0.1)
+    expect(res["success"] is True, f"CAD export with deflection failed: {res}")
+    expect("deflection" in (res.get("note") or "").lower(),
+           f"expected a note that deflection was ignored: {res}")
+
+
 check("document_io: unsaved doc requires path", t_save_unsaved_doc_requires_path)
 check("document_io: saveAs + save", t_save_document_with_path)
 check("document_io: export STEP and STL", t_export_step_and_stl)
 check("document_io: export default objects", t_export_default_objects)
 check("document_io: export bad extension", t_export_bad_extension)
 check("document_io: export unknown object", t_export_unknown_object)
+check("document_io: mesh deflection controls size", t_export_mesh_deflection_controls_size)
+check("document_io: deflection ignored for CAD", t_export_deflection_ignored_for_cad)
 
 
 # --------------------------------------------------------------------------

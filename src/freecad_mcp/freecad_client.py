@@ -65,8 +65,8 @@ class FreeCADConnection:
     def insert_part_from_library(self, relative_path: str) -> dict[str, Any]:
         return self.server.insert_part_from_library(relative_path)
 
-    def execute_code(self, code: str) -> dict[str, Any]:
-        return self.server.execute_code(code)
+    def execute_code(self, code: str, dry_run: bool = False) -> dict[str, Any]:
+        return self.server.execute_code(code, dry_run)
 
     def execute_code_async(self, code: str) -> dict[str, Any]:
         return self.server.execute_code_async(code)
@@ -86,6 +86,24 @@ class FreeCADConnection:
         except Exception as e:
             logger.error(f"Error getting screenshot: {e}")
             return None
+
+    def get_section_screenshot(
+        self,
+        doc_name: str,
+        plane: str = "XZ",
+        offset: float | None = None,
+        object_names: list[str] | None = None,
+        view_name: str = "Isometric",
+        width: int | None = None,
+        height: int | None = None,
+    ) -> dict[str, Any]:
+        try:
+            return self.server.get_section_screenshot(
+                doc_name, plane, offset, object_names, view_name, width, height
+            )
+        except Exception as e:
+            logger.error(f"Error getting section screenshot: {e}")
+            return {"success": False, "error": str(e)}
 
     def get_objects(self, doc_name: str, detail: str = "summary") -> dict[str, Any]:
         return self.server.get_objects(doc_name, detail)
@@ -108,6 +126,20 @@ class FreeCADConnection:
     ) -> dict[str, Any]:
         return self.server.get_topology(doc_name, obj_name, include_edges)
 
+    def check_printability(
+        self,
+        doc_name: str,
+        obj_name: str,
+        min_wall_thickness: float | None = None,
+        include_overhangs: bool = False,
+        build_direction: str = "Z",
+        max_overhang_deg: float = 45.0,
+    ) -> dict[str, Any]:
+        return self.server.check_printability(
+            doc_name, obj_name, min_wall_thickness, include_overhangs,
+            build_direction, max_overhang_deg,
+        )
+
     def save_document(self, doc_name: str, file_path: str | None = None) -> dict[str, Any]:
         return self.server.save_document(doc_name, file_path)
 
@@ -116,13 +148,14 @@ class FreeCADConnection:
         doc_name: str,
         file_path: str,
         object_names: list[str] | None = None,
+        linear_deflection: float | None = None,
     ) -> dict[str, Any]:
         # The addon dispatches export with a 300 s GUI-thread allowance for slow
         # meshing/STEP writes; the default 150 s transport socket timeout would
         # abort mid-export while the addon keeps working (and still writes the
         # file). Use a proxy whose socket outlasts the addon allowance.
         proxy = self._make_proxy(max(self._timeout, 330))
-        return proxy.export_document(doc_name, file_path, object_names)
+        return proxy.export_document(doc_name, file_path, object_names, linear_deflection)
 
     def get_report_log(self, tail: int = 100) -> dict[str, Any]:
         return self.server.get_report_log(tail)

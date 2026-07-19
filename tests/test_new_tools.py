@@ -83,6 +83,105 @@ def test_export_document_reports_size_and_objects():
     assert "4321" in text and "Box" in text
 
 
+def test_export_document_passes_deflection_and_surfaces_note():
+    fake = FakeFreeCAD(
+        export_document={
+            "success": True,
+            "file_path": "/tmp/out.stl",
+            "file_size_bytes": 9000,
+            "exported_objects": ["Cyl"],
+            "note": "linear_deflection ignored: ...",
+        }
+    )
+    text = text_of(
+        core.export_document_operation(fake, "Doc", "/tmp/out.stl", ["Cyl"], 0.05)
+    )
+    assert ("export_document", ("Doc", "/tmp/out.stl", ["Cyl"], 0.05)) in fake.calls
+    assert "Note:" in text
+
+
+def test_check_printability_passes_args_and_returns_json():
+    fake = FakeFreeCAD(
+        check_printability={
+            "success": True,
+            "manifold": {"is_watertight": True, "is_solid": True},
+            "wall_thickness": {"min_mm": 2.0, "below_threshold": True},
+        }
+    )
+    text = text_of(
+        core.check_printability_operation(fake, "Doc", "Part", 3.0, True, "Z", 40.0)
+    )
+    assert ("check_printability", ("Doc", "Part", 3.0, True, "Z", 40.0)) in fake.calls
+    assert "wall_thickness" in text and "is_watertight" in text
+
+
+def test_check_printability_error_names_available():
+    fake = FakeFreeCAD(
+        check_printability={
+            "success": False,
+            "error": "Object 'Nope' not found in 'Doc'. Available: ['Box']",
+        }
+    )
+    text = text_of(core.check_printability_operation(fake, "Doc", "Nope"))
+    assert "Box" in text and "Failed" in text
+
+
+def test_get_section_view_returns_labeled_image():
+    fake = FakeFreeCAD(
+        get_section_screenshot={"success": True, "image": "sectionpng"}
+    )
+    resp = core.get_section_view_operation(fake, False, "Doc", "XZ", 5.0)
+    images = [p for p in resp if p.type == "image"]
+    labels = [p.text for p in resp if p.type == "text"]
+    assert len(images) == 1 and images[0].data == "sectionpng"
+    assert any("Section view" in ln and "XZ" in ln for ln in labels)
+    assert ("get_section_screenshot", ("Doc", "XZ", 5.0, None, "Isometric")) in fake.calls
+
+
+def test_get_section_view_error_names_available():
+    fake = FakeFreeCAD(
+        get_section_screenshot={
+            "success": False,
+            "error": "Object 'Bxo' not found in 'Doc'. Available: ['Box']",
+        }
+    )
+    text = text_of(core.get_section_view_operation(fake, False, "Doc", object_names=["Bxo"]))
+    assert "Box" in text and "Failed" in text
+
+
+def test_get_section_view_respects_only_text_feedback():
+    fake = FakeFreeCAD(get_section_screenshot={"success": True, "image": "x"})
+    resp = core.get_section_view_operation(fake, True, "Doc")
+    assert not fake.called("get_section_screenshot")
+    assert all(p.type == "text" for p in resp)
+
+
+def test_get_views_returns_labeled_image_per_view():
+    fake = FakeFreeCAD(get_active_screenshot="b64png")
+    resp = core.get_views_operation(fake, False, ["Front", "Top", "Isometric"])
+    labels = [p.text for p in resp if p.type == "text"]
+    images = [p for p in resp if p.type == "image"]
+    assert len(images) == 3
+    assert any("Front" in ln for ln in labels)
+    assert any("Top" in ln for ln in labels)
+    # one capture call per requested view
+    assert sum(1 for c in fake.calls if c[0] == "get_active_screenshot") == 3
+
+
+def test_get_views_notes_unavailable_view():
+    fake = FakeFreeCAD(get_active_screenshot=None)  # e.g. TechDraw active view
+    resp = core.get_views_operation(fake, False, ["Front"])
+    text = text_of(resp)
+    assert "unavailable" in text.lower()
+
+
+def test_get_views_respects_only_text_feedback():
+    fake = FakeFreeCAD(get_active_screenshot="b64png")
+    resp = core.get_views_operation(fake, True, ["Front", "Top"])
+    assert not fake.called("get_active_screenshot")
+    assert all(p.type == "text" for p in resp)
+
+
 def test_get_report_log_formats():
     fake = FakeFreeCAD(
         get_report_log={

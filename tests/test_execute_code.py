@@ -27,6 +27,37 @@ def test_execute_code_failure_without_extras_still_works():
     assert "timed out" in text
 
 
+def test_execute_code_defaults_to_no_screenshot():
+    fake = FakeFreeCAD(
+        execute_code={"success": True, "message": "ok", "dry_run": False},
+        get_active_screenshot="imgdata",
+    )
+    core.execute_code_operation(fake, False, "print(1)")  # default include_screenshot=False
+    assert ("execute_code", ("print(1)", False)) in fake.calls
+    assert not fake.called("get_active_screenshot")
+
+
+def test_execute_code_dry_run_passed_through_and_skips_screenshot():
+    fake = FakeFreeCAD(
+        execute_code={
+            "success": True,
+            "dry_run": True,
+            "message": "executed successfully (dry run — all document changes rolled back).",
+        },
+        get_active_screenshot="imgdata",
+    )
+    text = text_of(
+        core.execute_code_operation(
+            fake, False, "doc.addObject('Part::Box','B')",
+            include_screenshot=True, dry_run=True,
+        )
+    )
+    assert ("execute_code", ("doc.addObject('Part::Box','B')", True)) in fake.calls
+    assert "dry run" in text
+    # even with include_screenshot=True, a dry run rolled changes back → no shot
+    assert not fake.called("get_active_screenshot")
+
+
 def test_execute_code_async_returns_job_id():
     fake = FakeFreeCAD(
         execute_code_async={"success": True, "job_id": "ab12cd34ef56"}

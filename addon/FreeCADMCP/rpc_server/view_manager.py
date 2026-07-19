@@ -146,3 +146,84 @@ def save_active_screenshot(
         return True
     except Exception as e:
         return str(e)
+
+
+def _sectionable_objects(doc, object_names):
+    """Resolve the objects to section: named ones, or all visible solids."""
+    if object_names:
+        objs = []
+        for name in object_names:
+            o = doc.getObject(name)
+            if o is None:
+                raise ValueError(
+                    f"Object '{name}' not found in '{doc.Name}'. "
+                    f"Available: {[x.Name for x in doc.Objects]}"
+                )
+            objs.append(o)
+        return objs
+    objs = []
+    for o in doc.Objects:
+        shape = getattr(o, "Shape", None)
+        vis = getattr(getattr(o, "ViewObject", None), "Visibility", False)
+        if vis and shape is not None and not shape.isNull() and shape.Solids:
+            objs.append(o)
+    return objs
+
+
+def save_section_screenshot(
+    save_path: str,
+    doc_name: str,
+    plane: str = "XZ",
+    offset=None,
+    object_names=None,
+    view_name: str = "Isometric",
+    width: int | None = None,
+    height: int | None = None,
+):
+    """Screenshot a cutaway: temporarily cut away the +normal half at the plane.
+
+    All changes (temporary cut objects, visibility toggles) are rolled back
+    before returning, so the document is left exactly as it was.
+    Returns True on success, or an error string.
+    """
+    from rpc_server.geometry_tools import section_shape
+
+    try:
+        doc = FreeCAD.getDocument(doc_name)
+    except Exception:
+        return f"Document '{doc_name}' not found."
+    try:
+        targets = _sectionable_objects(doc, object_names)
+    except ValueError as e:
+        return str(e)
+    if not targets:
+        return (
+            "No solids to section (no visible solids, or the named objects have "
+            "no solid geometry)."
+        )
+
+    saved_vis = {}
+    doc.UndoMode = 1
+    doc.openTransaction("MCP section view")
+    try:
+        for t in targets:
+            shape = getattr(t, "Shape", None)
+            if shape is None or shape.isNull() or not shape.Solids:
+                continue
+            saved_vis[t.Name] = t.ViewObject.Visibility
+            cut = section_shape(shape, plane, offset)
+            feat = doc.addObject("Part::Feature", f"{t.Name}_section")
+            feat.Shape = cut
+            t.ViewObject.Visibility = False
+        if not saved_vis:
+            return "None of the requested objects had solid geometry to section."
+        doc.recompute()
+        result = save_active_screenshot(save_path, view_name, width, height, None)
+        return result
+    finally:
+        for name, vis in saved_vis.items():
+            obj = doc.getObject(name)
+            if obj is not None:
+                obj.ViewObject.Visibility = vis
+        doc.abortTransaction()
+        doc.recompute()

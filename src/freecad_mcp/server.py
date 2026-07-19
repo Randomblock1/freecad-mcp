@@ -7,6 +7,7 @@ from mcp.types import ImageContent, TextContent
 
 from .freecad_client import FreeCADConnection
 from .operations import (
+    check_printability_operation,
     create_document_operation,
     create_object_operation,
     delete_object_operation,
@@ -20,8 +21,10 @@ from .operations import (
     get_objects_operation,
     get_parts_list_operation,
     get_report_log_operation,
+    get_section_view_operation,
     get_topology_operation,
     get_view_operation,
+    get_views_operation,
     insert_part_from_library_operation,
     list_documents_operation,
     measure_distance_operation,
@@ -79,11 +82,15 @@ mcp = FastMCP(
         "- PartDesign::* and Sketcher::* objects made via create_object are empty "
         "shells; build features and sketch geometry with execute_code.\n"
         "- execute_code state persists across calls (FreeCAD/App/FreeCADGui/Gui are "
-        "pre-imported); prefer one idempotent script over many small tool calls.\n"
+        "pre-imported); prefer one idempotent script over many small tool calls. It "
+        "returns no screenshot by default; pass dry_run=true to preview a script "
+        "and roll back its document changes.\n"
         "- Verify dimensions numerically with get_object (BoundBox/Volume/"
-        "CenterOfMass), measure_distance, and get_topology — not screenshots alone.\n"
+        "CenterOfMass), measure_distance, and get_topology — not screenshots alone. "
+        "Use get_views for several angles at once, get_section_view to see inside, "
+        "and check_printability for 3D-print readiness.\n"
         "- Documents live only in memory until save_document; export_document "
-        "writes STEP/STL/3MF etc.\n"
+        "writes STEP/STL/3MF etc. (linear_deflection sets mesh quality).\n"
         "- FreeCAD's console output (recompute errors, async job output) is "
         "readable via get_report_log.\n"
         "- FEM recipes: read the freecad://fem-workflow resource."
@@ -323,8 +330,9 @@ def get_async_status(ctx: Context, job_id: str | None = None) -> list[TextConten
 def execute_code(
     ctx: Context,
     code: str,
-    include_screenshot: bool = True,
+    include_screenshot: bool = False,
     view_name: ViewName = "Isometric",
+    dry_run: bool = False,
 ) -> list[TextContent | ImageContent]:
     """Execute arbitrary Python code in FreeCAD.
 
@@ -343,15 +351,21 @@ def execute_code(
 
     Args:
         code: The Python code to execute.
-        include_screenshot: Whether to return a screenshot of the model (default True).
-            Set to False to save tokens when the code does not change the model's
-            appearance, e.g. analytical or computational scripts whose result is
-            printed output, or intermediate steps in a longer sequence of changes.
+        include_screenshot: Whether to return a screenshot of the model
+            (default False — this tool is often used for probes and analytical
+            scripts). Set True when the code changes the model and you want to
+            see the result; or call get_view/get_views afterwards.
         view_name: The view orientation of the returned screenshot (default "Isometric").
             Pick the view that best shows the change being made.
+        dry_run: When True, run the code and return its output/errors, then roll
+            back all document changes (created/edited/deleted objects and new
+            documents). Use it to preview or validate a script without committing.
+            Only document state rolls back — file writes (save/export) and
+            persisted namespace variables do not.
 
     Returns:
-        A message indicating the success or failure of the code execution, the output of the code execution, and a screenshot of the object.
+        A message indicating success or failure, the code's output, and
+        (unless dry_run) a screenshot when include_screenshot is True.
     """
     return execute_code_operation(
         get_freecad_connection(),
@@ -359,11 +373,18 @@ def execute_code(
         code,
         include_screenshot,
         view_name,
+        dry_run,
     )
 
 
 @mcp.tool()
-def execute_code_from_file(ctx: Context, file_path: str) -> list[TextContent | ImageContent]:
+def execute_code_from_file(
+    ctx: Context,
+    file_path: str,
+    include_screenshot: bool = False,
+    view_name: ViewName = "Isometric",
+    dry_run: bool = False,
+) -> list[TextContent | ImageContent]:
     """Execute Python code from a file in FreeCAD.
 
     Prefer this over execute_code for long scripts that will be modified and
@@ -386,12 +407,24 @@ def execute_code_from_file(ctx: Context, file_path: str) -> list[TextContent | I
     Args:
         file_path: Absolute path to a UTF-8 encoded Python file to execute
             ("~" is expanded).
+        include_screenshot: Whether to return a screenshot afterwards
+            (default False). Set True to see the result, or use get_view/get_views.
+        view_name: The view orientation of the returned screenshot (default "Isometric").
+        dry_run: When True, run the script and return its output/errors, then
+            roll back all document changes — a safe way to test a generator
+            script before committing. File writes and namespace vars persist.
 
     Returns:
-        A message indicating the success or failure of the code execution, the output of the code execution, and a screenshot of the object.
+        A message indicating success or failure, the code's output, and
+        (unless dry_run) a screenshot when include_screenshot is True.
     """
     return execute_code_from_file_operation(
-        get_freecad_connection(), state.only_text_feedback, file_path
+        get_freecad_connection(),
+        state.only_text_feedback,
+        file_path,
+        include_screenshot,
+        view_name,
+        dry_run,
     )
 
 
@@ -427,6 +460,82 @@ def get_view(
         A screenshot of the active view.
     """
     return get_view_operation(get_freecad_connection(), view_name, width, height, focus_object)
+
+
+@mcp.tool()
+def get_views(
+    ctx: Context,
+    view_names: list[ViewName] | None = None,
+    width: int | None = None,
+    height: int | None = None,
+    focus_object: str | None = None,
+) -> list[ImageContent | TextContent]:
+    """Get screenshots of several views in one call.
+
+    Use this instead of repeated get_view calls when verifying a model from
+    multiple angles (the common front/top/isometric check). Each image is
+    preceded by a text label naming its view.
+
+    Args:
+        view_names: Views to capture, in order. Defaults to
+            ["Isometric", "Front", "Top"]. Any of: Isometric, Front, Top, Right,
+            Back, Left, Bottom, Dimetric, Trimetric.
+        width: Pixel width per image. Omit for the auto-sized default (longest
+            edge capped at 800 px); pass explicit values for full resolution.
+        height: Pixel height per image (see width).
+        focus_object: Object to frame in every view; omit to fit all objects.
+
+    Returns:
+        One labelled screenshot per requested view.
+    """
+    if view_names is None:
+        view_names = ["Isometric", "Front", "Top"]
+    return get_views_operation(
+        get_freecad_connection(),
+        state.only_text_feedback,
+        view_names,
+        width,
+        height,
+        focus_object,
+    )
+
+
+@mcp.tool()
+def get_section_view(
+    ctx: Context,
+    doc_name: str,
+    plane: Literal["XY", "XZ", "YZ"] = "XZ",
+    offset: float | None = None,
+    object_names: list[str] | None = None,
+    view_name: ViewName = "Isometric",
+) -> list[ImageContent | TextContent]:
+    """Render a cutaway (section) screenshot to see inside a model.
+
+    Temporarily cuts away the half of the model on the +normal side of the
+    plane, screenshots the exposed cross-section, then rolls everything back —
+    the document is never actually modified.
+
+    Args:
+        doc_name: The document to section.
+        plane: The cutting plane — "XY" (normal Z), "XZ" (normal Y, default), or
+            "YZ" (normal X). The material on the +normal side is removed.
+        offset: Position of the plane along its normal axis (mm). Defaults to the
+            model's center along that axis.
+        object_names: Objects to section. Omit to section all visible solids.
+        view_name: Camera orientation for the screenshot (default "Isometric").
+
+    Returns:
+        A labelled cutaway screenshot.
+    """
+    return get_section_view_operation(
+        get_freecad_connection(),
+        state.only_text_feedback,
+        doc_name,
+        plane,
+        offset,
+        object_names,
+        view_name,
+    )
 
 
 @mcp.tool()
@@ -582,6 +691,51 @@ def get_topology(
 
 
 @mcp.tool()
+def check_printability(
+    ctx: Context,
+    doc_name: str,
+    obj_name: str,
+    min_wall_thickness: float | None = None,
+    include_overhangs: bool = False,
+    build_direction: Literal["X", "Y", "Z"] = "Z",
+    max_overhang_deg: float = 45.0,
+) -> list[TextContent]:
+    """Check an object for basic 3D-print readiness.
+
+    Reports watertightness/manifoldness and an estimated minimum wall thickness.
+    Overhang analysis is opt-in (modern printers handle overhangs with generated
+    supports).
+
+    Args:
+        doc_name: The document containing the object.
+        obj_name: The object to check.
+        min_wall_thickness: If given (mm), flags when the estimated minimum wall
+            is below it.
+        include_overhangs: Also report downward-facing overhang faces steeper
+            than max_overhang_deg (faces resting on the build plate excluded).
+            Off by default.
+        build_direction: Build/up axis for overhang analysis ("Z" default).
+        max_overhang_deg: Overhang angle from vertical beyond which a face is
+            flagged (default 45).
+
+    Returns:
+        manifold (is_valid/is_solid/is_watertight/solid_count), wall_thickness
+        (sampled estimate — min_mm, samples, below_threshold), and, when opted
+        in, overhangs (count, total area, worst angle, faces). Wall thickness is
+        an estimate from face-centroid rays, not a guaranteed minimum.
+    """
+    return check_printability_operation(
+        get_freecad_connection(),
+        doc_name,
+        obj_name,
+        min_wall_thickness,
+        include_overhangs,
+        build_direction,
+        max_overhang_deg,
+    )
+
+
+@mcp.tool()
 def save_document(
     ctx: Context,
     doc_name: str,
@@ -607,6 +761,7 @@ def export_document(
     doc_name: str,
     file_path: str,
     object_names: list[str] | None = None,
+    linear_deflection: float | None = None,
 ) -> list[TextContent]:
     """Export objects to a CAD or mesh file; format chosen by file extension.
 
@@ -618,12 +773,16 @@ def export_document(
         file_path: Destination path including extension (absolute; "~" expanded).
         object_names: Objects to export. Omit to export all top-level objects
             with geometry (a PartDesign Body exports once, not per-feature).
+        linear_deflection: Max chord deviation (mm) for mesh tessellation —
+            smaller is finer/larger (e.g. 0.05 for detailed prints, 0.5 for
+            coarse). Applies to mesh formats only (STL/OBJ/3MF/PLY/AMF); ignored
+            with a note for exact CAD formats. Omit for FreeCAD's default.
 
     Returns:
         The exported file path, size, and object list.
     """
     return export_document_operation(
-        get_freecad_connection(), doc_name, file_path, object_names
+        get_freecad_connection(), doc_name, file_path, object_names, linear_deflection
     )
 
 

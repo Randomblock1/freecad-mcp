@@ -184,18 +184,21 @@ All lengths are millimeters; angles are degrees. `create_document`/`create_objec
 * `create_object`: Create a new object in FreeCAD. Warns when the object does not recompute cleanly (e.g. a boolean missing Base/Tool).
 * `edit_object`: Edit an object in FreeCAD.
 * `delete_object`: Delete an object in FreeCAD.
-* `execute_code`: Execute arbitrary Python code in FreeCAD. State persists across calls in a namespace isolated from the RPC server; failures return the traceback (with line numbers into your code) and any output printed before the error.
-* `execute_code_from_file`: Execute Python code from a file on the machine running the MCP server. Useful for long scripts that are iterated on: the agent writes the script to a file once, then edits it selectively and re-runs it without resending the full source each time.
+* `execute_code`: Execute arbitrary Python code in FreeCAD. State persists across calls in a namespace isolated from the RPC server; failures return the traceback (with line numbers into your code) and any output printed before the error. Screenshots are off by default (`include_screenshot`); pass `dry_run=true` to run the code and then roll back all document changes.
+* `execute_code_from_file`: Execute Python code from a file on the machine running the MCP server. Useful for long scripts that are iterated on: the agent writes the script to a file once, then edits it selectively and re-runs it without resending the full source each time. Also supports `dry_run` and `include_screenshot`.
 * `execute_code_async`: Run background-safe code in a worker thread; returns a job id.
 * `get_async_status`: Poll a background job (running/completed/failed with error + traceback).
 * `insert_part_from_library`: Insert a part from the [parts library](https://github.com/FreeCAD/FreeCAD-library).
 * `get_view`: Get a screenshot of the active view. Default screenshots are capped at 800 px on the longest edge; pass explicit `width`/`height` for full resolution.
+* `get_views`: Get several views (default front/top/isometric) in one call, each image labelled — avoids repeated single-view screenshot cycles.
+* `get_section_view`: Render a cutaway screenshot at a plane (XY/XZ/YZ) to see inside a model; the cut is rolled back so the document is never modified.
 * `get_objects`: Get all objects in a document. `detail="summary"` (default) returns a compact health/envelope view and omits PartDesign Origin scaffolding; `detail="full"` returns every property.
 * `get_object`: Get an object in a document (full detail, including `BoundBox`, `CenterOfMass`, validity, and recompute `State`).
 * `measure_distance`: Minimum distance between two objects or sub-elements (`Face3`, `Edge1`, ...); reports intersection volume when shapes overlap.
 * `get_topology`: Per-face type/area/centroid/normal breakdown (plus optional edges) — the face names FEM constraint `References` expect.
+* `check_printability`: Basic 3D-print readiness — watertight/manifold check and an estimated minimum wall thickness; overhang analysis is opt-in.
 * `save_document`: Save a document to `.FCStd` (documents live only in memory until saved).
-* `export_document`: Export objects to STEP/IGES/BREP (exact) or STL/OBJ/3MF/PLY/AMF (mesh), chosen by file extension.
+* `export_document`: Export objects to STEP/IGES/BREP (exact) or STL/OBJ/3MF/PLY/AMF (mesh), chosen by file extension; `linear_deflection` controls mesh tessellation quality.
 * `get_report_log`: Read FreeCAD's Report view console log (recompute errors, async job output, addon diagnostics).
 * `get_parts_list`: Get the list of parts in the [parts library](https://github.com/FreeCAD/FreeCAD-library).
 * `run_fem_analysis`: Run the CalculiX solver on an existing `Fem::FemAnalysis` and return summary results (max von Mises stress, max displacement, node count, working directory). Auto-creates a `SolverCcxTools` if the analysis has none. See [`examples/cantilever_fem.py`](examples/cantilever_fem.py) for an end-to-end usage example, and the `freecad://fem-workflow` MCP resource for setup recipes.
