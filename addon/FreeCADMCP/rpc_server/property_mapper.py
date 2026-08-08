@@ -116,6 +116,13 @@ def set_object_property(
                 elif prop == "References" and isinstance(val, list):
                     setattr(obj, prop, resolve_references(doc, val))
 
+                elif prop == "Material" and isinstance(val, dict):
+                    # Fem::MaterialCommon.Material is an App::PropertyMap
+                    # (string->string); FreeCAD rejects non-string values, so a
+                    # bare number like PoissonRatio: 0.3 would hard-fail. Coerce
+                    # every value to a string so numeric inputs work.
+                    setattr(obj, prop, {k: str(v) for k, v in val.items()})
+
                 else:
                     setattr(obj, prop, val)
             # ShapeColor is a property of the ViewObject

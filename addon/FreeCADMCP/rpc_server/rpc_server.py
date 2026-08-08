@@ -11,6 +11,17 @@ from typing import Any
 
 from PySide import QtCore
 
+from rpc_server.code_exec import (
+    RollbackInProgress,
+    async_job_status,
+    complete_async_job,
+    exec_namespace,
+    format_exec_error,
+    rollback_documents,
+    rollback_guard,
+    start_async_job,
+    xml_safe,
+)
 from rpc_server.commands import register_commands, schedule_toggle_sync
 from rpc_server.fem_executor import run_fem_analysis as _run_fem_analysis
 from rpc_server.gui_dispatch import (
@@ -20,13 +31,18 @@ from rpc_server.gui_dispatch import (
     process_gui_tasks,
     request_shutdown,
 )
+from rpc_server.document_io import export_document as _export_document
+from rpc_server.document_io import save_document as _save_document
+from rpc_server.document_query import query_object, query_objects
+from rpc_server.geometry_tools import check_printability as _check_printability
+from rpc_server.geometry_tools import get_topology as _get_topology
+from rpc_server.geometry_tools import measure_distance as _measure_distance
 from rpc_server.ip_filter import FilteredXMLRPCServer, validate_allowed_ips
-from rpc_server.object_factory import create_object_gui
+from rpc_server.object_factory import create_object_gui, recompute_state_warning
 from rpc_server.parts_library import get_parts_list, insert_part_from_library
 from rpc_server.property_mapper import Object, set_object_property
-from rpc_server.serialize import serialize_object
 from rpc_server.settings import load_settings, save_settings
-from rpc_server.view_manager import save_active_screenshot
+from rpc_server.view_manager import save_active_screenshot, save_section_screenshot
 
 rpc_server_thread = None
 rpc_server_instance = None
@@ -36,6 +52,11 @@ _stop_thread = None  # drains shutdown off the GUI thread; see stop_rpc_server
 def _ok(res) -> bool:
     """True when a GUI-thread handler returned success."""
     return res is True
+
+
+def _ok_dict(res) -> bool:
+    """True when a GUI-thread handler returned a structured success dict."""
+    return isinstance(res, dict) and bool(res.get("success"))
 
 
 def _err(res) -> dict:
@@ -59,7 +80,7 @@ class FreeCADRPC:
         # ("Doc" -> "Doc001"); reporting the requested name breaks every
         # follow-up call that uses it.
         res = dispatch_to_gui(lambda: self._create_document_gui(name))
-        if isinstance(res, dict) and res.get("success"):
+        if _ok_dict(res):
             return res
         return _err(res)
 
@@ -73,7 +94,7 @@ class FreeCADRPC:
         # create_object_gui reports the created object's actual Name (see
         # its docstring) — same sanitise/de-duplicate concern as documents.
         res = dispatch_to_gui(lambda: self._create_object_gui(doc_name, obj))
-        if isinstance(res, dict) and res.get("success"):
+        if _ok_dict(res):
             return res
         return _err(res)
 
@@ -83,8 +104,8 @@ class FreeCADRPC:
             properties=properties.get("Properties", {}),
         )
         res = dispatch_to_gui(lambda: self._edit_object_gui(doc_name, obj))
-        if _ok(res):
-            return {"success": True, "object_name": obj.name}
+        if _ok_dict(res):
+            return res
         return _err(res)
 
     def delete_object(self, doc_name: str, obj_name: str):
@@ -120,11 +141,11 @@ class FreeCADRPC:
         return {"success": False, "error": str(res)}
 
     def execute_code_async(self, code: str) -> dict[str, Any]:
-        """Start code execution in a background thread and return immediately.
+        """Start code execution in a background thread and return a job id.
 
         Use for long-running OCCT operations (fuse/cut/loft) that would otherwise
-        exceed the MCP timeout. The caller should poll a document object for
-        completion status (e.g. check SessionState.Label via get_object).
+        exceed the MCP timeout. Poll get_async_status(job_id) for completion,
+        errors, and tracebacks.
         """
         def _set_status(msg):
             dispatch_to_gui(lambda: FreeCADGui.getMainWindow().statusBar().showMessage(msg))
@@ -132,74 +153,185 @@ class FreeCADRPC:
         def _clear_status():
             dispatch_to_gui(lambda: FreeCADGui.getMainWindow().statusBar().clearMessage())
 
+        try:
+            job_id = start_async_job(code)
+        except RollbackInProgress as e:
+            # A dry run or section screenshot holds the rollback reservation;
+            # starting now would only get this job's work aborted underneath it.
+            return {"success": False, "error": str(e)}
+
         def worker() -> None:
             # NOTE: we do NOT redirect sys.stdout here. contextlib.redirect_stdout
             # swaps stdout process-wide, not per-thread, so it would race with the
             # GUI thread and other concurrent work. Background code should report
             # via FreeCAD.Console (which is thread-safe) instead.
+            error = None
             try:
-                exec(code, globals())
-                FreeCAD.Console.PrintMessage("Async code execution completed.\n")
-            except Exception as e:
-                import traceback as _tb
+                exec(code, exec_namespace())
+                FreeCAD.Console.PrintMessage(f"Async job {job_id} completed.\n")
+            except BaseException as e:
+                # BaseException, not Exception: user code that calls sys.exit()
+                # raises SystemExit, which threading otherwise swallows silently
+                # and which would leave the job marked "completed" (false success).
+                error = format_exec_error(e)
                 FreeCAD.Console.PrintError(
-                    f"Async code error: {e}\n{_tb.format_exc()}"
+                    f"Async job {job_id} failed: {error['error']}\n"
+                    f"{error.get('traceback', '')}\n"
                 )
             finally:
+                complete_async_job(job_id, error)
                 _clear_status()
 
         _set_status("MCP: running background task…")
         threading.Thread(target=worker, daemon=True).start()
-        return {"success": True, "message": "Code execution started in background."}
+        return {
+            "success": True,
+            "job_id": job_id,
+            "message": "Code execution started in background.",
+        }
 
-    def execute_code(self, code: str) -> dict[str, Any]:
+    def get_async_status(self, job_id: str | None = None) -> dict[str, Any]:
+        """Status of one background job (or all jobs when job_id is None)."""
+        return async_job_status(job_id)
+
+    def execute_code(self, code: str, dry_run: bool = False) -> dict[str, Any]:
         """Execute Python code on the GUI thread and wait for the result.
 
         Runs on the GUI thread so that FreeCAD document operations
         (addObject, recompute, save) are safe and correctly ordered.
         Use execute_code_async for heavy OCCT boolean ops (fuse/cut)
         that would block the GUI thread too long.
+
+        When dry_run is True, all document changes are rolled back after the
+        code runs (see rollback_documents): the code executes and its output /
+        errors are returned, but the document tree is left untouched.
+
+        On failure, returns the exception, the traceback frames pointing into
+        the submitted code (line numbers refer to the submitted string), and
+        whatever the code printed before dying.
         """
-        output_buffer = io.StringIO()
+        # The reservation must span the dispatch, not just this check: the
+        # transaction opens on the GUI thread once the queue drains, which can
+        # be much later than the check on this thread.
+        with contextlib.ExitStack() as stack:
+            if dry_run:
+                busy = stack.enter_context(rollback_guard("execute_code with dry_run"))
+                if busy:
+                    return {"success": False, "error": busy}
 
-        def task():
-            with contextlib.redirect_stdout(output_buffer):
-                exec(code, globals())
-            return True
+            output_buffer = io.StringIO()
 
-        res = dispatch_to_gui(task, timeout=self.EXECUTE_CODE_TIMEOUT)
-        if _ok(res):
-            FreeCAD.Console.PrintMessage("Python code executed successfully.\n")
-            return {
-                "success": True,
-                "message": "Python code executed successfully.\nOutput: " + output_buffer.getvalue(),
-            }
-        # Log the offending code (truncated) to make errors traceable
-        code_preview = code if len(code) <= 800 else code[:800] + "\n...(truncated)"
-        FreeCAD.Console.PrintError(
-            f"Error executing Python code: {res}\n"
-            f"--- code ---\n{code_preview}\n--- end ---\n"
-        )
-        return _err(res)
+            def task():
+                try:
+                    if dry_run:
+                        with rollback_documents():
+                            with contextlib.redirect_stdout(output_buffer):
+                                exec(code, exec_namespace())
+                    else:
+                        with contextlib.redirect_stdout(output_buffer):
+                            exec(code, exec_namespace())
+                    return True
+                except BaseException as e:
+                    # BaseException, not Exception: code calling sys.exit() raises
+                    # SystemExit, which neither dispatch_to_gui's wrapper nor the
+                    # GUI task loop catches — it would escape a Qt slot and leave
+                    # this call hanging until EXECUTE_CODE_TIMEOUT with a bogus
+                    # timeout error. Same reasoning as the async worker above.
+                    return {**format_exec_error(e), "stdout": xml_safe(output_buffer.getvalue())}
 
-    def get_objects(self, doc_name):
-        # FreeCAD.getDocument raises (not returns None) for an unknown name.
-        try:
-            doc = FreeCAD.getDocument(doc_name)
-        except Exception:
-            return []
-        return [serialize_object(obj) for obj in doc.Objects]
+            res = dispatch_to_gui(task, timeout=self.EXECUTE_CODE_TIMEOUT)
+            if _ok(res):
+                FreeCAD.Console.PrintMessage("Python code executed successfully.\n")
+                prefix = "Python code executed successfully"
+                if dry_run:
+                    prefix += " (dry run — all document changes rolled back)"
+                return {
+                    "success": True,
+                    "dry_run": dry_run,
+                    "message": prefix + ".\nOutput: " + xml_safe(output_buffer.getvalue()),
+                }
+            # Log the offending code (truncated) to make errors traceable
+            code_preview = code if len(code) <= 800 else code[:800] + "\n...(truncated)"
+            err_text = res.get("error") if isinstance(res, dict) else res
+            FreeCAD.Console.PrintError(
+                f"Error executing Python code: {err_text}\n"
+                f"--- code ---\n{code_preview}\n--- end ---\n"
+            )
+            return _err(res)
+
+    def get_objects(self, doc_name, detail="summary"):
+        return query_objects(doc_name, detail)
 
     def get_object(self, doc_name, obj_name):
-        # FreeCAD.getDocument raises (not returns None) for an unknown name.
+        return query_object(doc_name, obj_name)
+
+    def measure_distance(self, doc_name, object1, object2, sub1=None, sub2=None):
+        """Read-only OCCT distance query; safe on the RPC thread (get_objects precedent)."""
+        return _measure_distance(doc_name, object1, object2, sub1, sub2)
+
+    def get_topology(self, doc_name, obj_name, include_edges=False):
+        """Read-only topology breakdown; safe on the RPC thread."""
+        return _get_topology(doc_name, obj_name, include_edges)
+
+    def check_printability(self, doc_name, obj_name, min_wall_thickness=None,
+                           include_overhangs=False, build_direction="Z", max_overhang_deg=45.0):
+        """Read-only print-readiness analysis; safe on the RPC thread."""
+        return _check_printability(doc_name, obj_name, min_wall_thickness,
+                                   include_overhangs, build_direction, max_overhang_deg)
+
+    def save_document(self, doc_name, file_path=None):
+        res = dispatch_to_gui(lambda: _save_document(doc_name, file_path))
+        if _ok_dict(res):
+            return res
+        return _err(res)
+
+    def export_document(self, doc_name, file_path, object_names=None, linear_deflection=None):
+        # Meshing/STEP-writing large models can be slow; allow a longer wait.
+        res = dispatch_to_gui(
+            lambda: _export_document(doc_name, file_path, object_names, linear_deflection),
+            timeout=300,
+        )
+        if _ok_dict(res):
+            return res
+        return _err(res)
+
+    def get_report_log(self, tail=100):
         try:
-            doc = FreeCAD.getDocument(doc_name)
-        except Exception:
-            return None
-        obj = doc.getObject(obj_name)
-        if obj:
-            return serialize_object(obj)
-        return None
+            tail = max(0, int(tail))
+        except (TypeError, ValueError):
+            return {"success": False, "error": f"invalid tail: {tail!r}"}
+        res = dispatch_to_gui(lambda: self._get_report_log_gui(tail))
+        if _ok_dict(res):
+            return res
+        return _err(res)
+
+    def _get_report_log_gui(self, tail: int):
+        from PySide import QtWidgets
+
+        mw = FreeCADGui.getMainWindow()
+        dock = mw.findChild(QtWidgets.QDockWidget, "Report view")
+        if dock is None:
+            return {
+                "success": False,
+                "error": "Report view dock not found in this FreeCAD build.",
+            }
+        text_widget = dock.findChild(QtWidgets.QPlainTextEdit) or dock.findChild(
+            QtWidgets.QTextEdit
+        )
+        if text_widget is None:
+            return {"success": False, "error": "Report view text widget not found."}
+        lines = text_widget.toPlainText().splitlines()
+        total = len(lines)
+        if tail and total > tail:
+            lines = lines[-tail:]
+        return {
+            "success": True,
+            # Report-view text is arbitrary (user PrintMessage/PrintError, solver
+            # output); strip XML-illegal control chars so the response marshals.
+            "log": xml_safe("\n".join(lines)),
+            "total_lines": total,
+            "returned_lines": len(lines),
+        }
 
     def insert_part_from_library(self, relative_path):
         res = dispatch_to_gui(lambda: self._insert_part_from_library(relative_path))
@@ -254,11 +386,58 @@ class FreeCADRPC:
             if os.path.exists(tmp_path):
                 os.remove(tmp_path)
 
+    def get_section_screenshot(
+        self,
+        doc_name,
+        plane="XZ",
+        offset=None,
+        object_names=None,
+        view_name="Isometric",
+        width=None,
+        height=None,
+    ):
+        """Cutaway screenshot: temporarily cut away the +normal half at the plane.
+
+        All temporary changes are rolled back before returning. Returns
+        {"success": True, "image": <base64 png>} or {"success": False, "error": ...}.
+        """
+        # Reserved here rather than inside save_section_screenshot so the
+        # reservation also covers the wait for the GUI queue to drain, which is
+        # where an async job would otherwise slip in.
+        with rollback_guard("a section screenshot") as busy:
+            if busy:
+                return {"success": False, "error": busy}
+
+            fd, tmp_path = tempfile.mkstemp(suffix=".png")
+            os.close(fd)
+
+            def task():
+                return save_section_screenshot(
+                    tmp_path, doc_name, plane, offset, object_names, view_name, width, height
+                )
+
+            try:
+                # The temporary boolean cut can be slow on large models.
+                res = dispatch_to_gui(task, timeout=120)
+                if _ok(res):
+                    with open(tmp_path, "rb") as f:
+                        return {
+                            "success": True,
+                            "image": base64.b64encode(f.read()).decode("utf-8"),
+                        }
+                err = res.get("error", str(res)) if isinstance(res, dict) else str(res)
+                return {"success": False, "error": err}
+            finally:
+                if os.path.exists(tmp_path):
+                    os.remove(tmp_path)
+
     def _create_document_gui(self, name):
         doc = FreeCAD.newDocument(name)
         doc.recompute()
         FreeCAD.Console.PrintMessage(f"Document '{doc.Name}' created via RPC.\n")
-        return {"success": True, "document_name": doc.Name}
+        # doc.Name is what FreeCAD actually assigned (sanitized, deduplicated);
+        # reporting the requested name instead would corrupt the caller's model.
+        return {"success": True, "document_name": doc.Name, "requested_name": name}
 
     def _create_object_gui(self, doc_name, obj: Object):
         return create_object_gui(doc_name, obj)
@@ -279,7 +458,11 @@ class FreeCADRPC:
             set_object_property(doc, obj_ins, obj.properties)
             doc.recompute()
             FreeCAD.Console.PrintMessage(f"Object '{obj.name}' updated via RPC.\n")
-            return True
+            return {
+                "success": True,
+                "object_name": obj_ins.Name,
+                **recompute_state_warning(obj_ins),
+            }
         except Exception as e:
             return str(e)
 

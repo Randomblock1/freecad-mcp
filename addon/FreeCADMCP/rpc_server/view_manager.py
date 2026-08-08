@@ -31,12 +31,10 @@ def _get_view_size(view: Any) -> tuple[int, int]:
         return 1024, 768
 
 
-# Longest edge used when the caller does not ask for a specific size. The
-# screenshot's cost to an LLM client scales with its pixel count, and hosts
-# commonly downscale anything larger than ~1.5k px before the model ever sees
-# it, so rendering at the full window size just inflates the payload. An
-# explicit width/height is always honoured as given.
-MAX_AUTO_SCREENSHOT_EDGE = 1024
+# Default screenshots follow the viewport, which on large displays produces
+# ~1000+ px images costing ~1500 image tokens each. Cap the default at 800 px
+# on the longest edge (~59% cheaper); explicit width/height always win.
+DEFAULT_MAX_EDGE = 800
 
 
 def _scale_to_max_edge(width: int, height: int, max_edge: int) -> tuple[int, int]:
@@ -44,7 +42,8 @@ def _scale_to_max_edge(width: int, height: int, max_edge: int) -> tuple[int, int
     if longest <= max_edge:
         return width, height
     scale = max_edge / longest
-    return max(1, int(width * scale)), max(1, int(height * scale))
+    # round() so the longest edge lands exactly on max_edge (int truncates short).
+    return max(1, round(width * scale)), max(1, round(height * scale))
 
 
 def _resolve_screenshot_size(
@@ -54,7 +53,7 @@ def _resolve_screenshot_size(
 ) -> tuple[int, int]:
     view_width, view_height = _get_view_size(view)
     if width is None and height is None:
-        return _scale_to_max_edge(view_width, view_height, MAX_AUTO_SCREENSHOT_EDGE)
+        return _scale_to_max_edge(view_width, view_height, DEFAULT_MAX_EDGE)
     resolved_width = view_width if width is None else max(1, int(width))
     resolved_height = view_height if height is None else max(1, int(height))
     return resolved_width, resolved_height
@@ -152,3 +151,87 @@ def save_active_screenshot(
         return True
     except Exception as e:
         return str(e)
+
+
+def _sectionable_objects(doc, object_names):
+    """Resolve the objects to section: named ones, or all visible solids."""
+    if object_names:
+        objs = []
+        for name in object_names:
+            o = doc.getObject(name)
+            if o is None:
+                raise ValueError(
+                    f"Object '{name}' not found in '{doc.Name}'. "
+                    f"Available: {[x.Name for x in doc.Objects]}"
+                )
+            objs.append(o)
+        return objs
+    objs = []
+    for o in doc.Objects:
+        shape = getattr(o, "Shape", None)
+        vis = getattr(getattr(o, "ViewObject", None), "Visibility", False)
+        if vis and shape is not None and not shape.isNull() and shape.Solids:
+            objs.append(o)
+    return objs
+
+
+def save_section_screenshot(
+    save_path: str,
+    doc_name: str,
+    plane: str = "XZ",
+    offset=None,
+    object_names=None,
+    view_name: str = "Isometric",
+    width: int | None = None,
+    height: int | None = None,
+):
+    """Screenshot a cutaway: temporarily cut away the +normal half at the plane.
+
+    All changes (temporary cut objects, visibility toggles) are rolled back
+    before returning, so the document is left exactly as it was.
+    Returns True on success, or an error string.
+
+    Aborts an undo transaction, so callers must hold code_exec.rollback_guard
+    for the duration or a concurrent async job's changes go with it.
+    """
+    from rpc_server.geometry_tools import section_shape
+
+    try:
+        doc = FreeCAD.getDocument(doc_name)
+    except Exception:
+        return f"Document '{doc_name}' not found."
+    try:
+        targets = _sectionable_objects(doc, object_names)
+    except ValueError as e:
+        return str(e)
+    if not targets:
+        return (
+            "No solids to section (no visible solids, or the named objects have "
+            "no solid geometry)."
+        )
+
+    saved_vis = {}
+    doc.UndoMode = 1
+    doc.openTransaction("MCP section view")
+    try:
+        for t in targets:
+            shape = getattr(t, "Shape", None)
+            if shape is None or shape.isNull() or not shape.Solids:
+                continue
+            saved_vis[t.Name] = t.ViewObject.Visibility
+            cut = section_shape(shape, plane, offset)
+            feat = doc.addObject("Part::Feature", f"{t.Name}_section")
+            feat.Shape = cut
+            t.ViewObject.Visibility = False
+        if not saved_vis:
+            return "None of the requested objects had solid geometry to section."
+        doc.recompute()
+        result = save_active_screenshot(save_path, view_name, width, height, None)
+        return result
+    finally:
+        for name, vis in saved_vis.items():
+            obj = doc.getObject(name)
+            if obj is not None:
+                obj.ViewObject.Visibility = vis
+        doc.abortTransaction()
+        doc.recompute()
