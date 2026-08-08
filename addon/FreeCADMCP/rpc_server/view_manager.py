@@ -191,7 +191,12 @@ def save_section_screenshot(
     before returning, so the document is left exactly as it was.
     Returns True on success, or an error string.
     """
+    from rpc_server.code_exec import busy_with_async_jobs
     from rpc_server.geometry_tools import section_shape
+
+    busy = busy_with_async_jobs("a section screenshot")
+    if busy:
+        return busy
 
     try:
         doc = FreeCAD.getDocument(doc_name)

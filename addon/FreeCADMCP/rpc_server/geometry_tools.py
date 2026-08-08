@@ -105,6 +105,7 @@ _INTERSECTION_FACE_LIMIT = 2000
 
 
 _BUILD_AXES = {"X": (1.0, 0.0, 0.0), "Y": (0.0, 1.0, 0.0), "Z": (0.0, 0.0, 1.0)}
+_AXIS_INDEX = {"X": 0, "Y": 1, "Z": 2}
 _THICKNESS_SAMPLE_LIMIT = 80
 
 
@@ -247,14 +248,19 @@ def check_printability(
 
     if include_overhangs:
         d = FreeCAD.Vector(*_BUILD_AXES.get(build_direction.upper(), (0.0, 0.0, 1.0)))
-        axis_idx = "XYZ".index(build_direction.upper()) if build_direction.upper() in "XYZ" else 2
+        # Exact lookup, matching _BUILD_AXES above: a substring test against
+        # "XYZ" would accept "" or "XY" and pick an index that disagrees with
+        # the direction vector d, silently measuring against the wrong axis.
+        axis_idx = _AXIS_INDEX.get(build_direction.upper(), 2)
         model_min = [shape.BoundBox.XMin, shape.BoundBox.YMin, shape.BoundBox.ZMin][axis_idx]
         overhang_faces, worst = [], 0.0
+        skipped = 0
         for i, face in enumerate(faces):
             try:
                 n = _outward_normal(shape, face)
                 c = face.CenterOfMass
             except Exception:
+                skipped += 1  # degenerate face; counted so the result admits it
                 continue
             # Faces resting on the build plate (at the model's min build coord)
             # are supported by the plate, not overhangs.
@@ -274,6 +280,12 @@ def check_printability(
             "worst_angle_deg": worst,
             "faces": overhang_faces[:_TOPO_LIMIT],
         }
+        if skipped:
+            result["overhangs"]["skipped_faces"] = skipped
+            result["overhangs"]["note"] = (
+                f"{skipped} face(s) could not be analysed (degenerate geometry); "
+                "count and worst_angle_deg may understate the real overhangs."
+            )
 
     return result
 

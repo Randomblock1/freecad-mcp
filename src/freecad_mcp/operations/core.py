@@ -494,8 +494,9 @@ def export_document_operation(
         res = freecad.export_document(doc_name, file_path, object_names, linear_deflection)
         if res.get("success") is False:
             return _lookup_error_response(res, "export document")
+        names = res.get("exported_objects") or []
         msg = (
-            f"Exported {res['exported_objects']} to {res['file_path']} "
+            f"Exported {', '.join(names) or 'nothing'} to {res['file_path']} "
             f"({int(res['file_size_bytes'])} bytes)"
         )
         if res.get("note"):

@@ -13,6 +13,7 @@ from PySide import QtCore
 
 from rpc_server.code_exec import (
     async_job_status,
+    busy_with_async_jobs,
     complete_async_job,
     exec_namespace,
     format_exec_error,
@@ -203,6 +204,11 @@ class FreeCADRPC:
         the submitted code (line numbers refer to the submitted string), and
         whatever the code printed before dying.
         """
+        if dry_run:
+            busy = busy_with_async_jobs("execute_code with dry_run")
+            if busy:
+                return {"success": False, "error": busy}
+
         output_buffer = io.StringIO()
 
         def task():
@@ -215,7 +221,12 @@ class FreeCADRPC:
                     with contextlib.redirect_stdout(output_buffer):
                         exec(code, exec_namespace())
                 return True
-            except Exception as e:
+            except BaseException as e:
+                # BaseException, not Exception: code calling sys.exit() raises
+                # SystemExit, which neither dispatch_to_gui's wrapper nor the GUI
+                # task loop catches — it would escape a Qt slot and leave this
+                # call hanging until EXECUTE_CODE_TIMEOUT with a bogus timeout
+                # error. Same reasoning as the async worker above.
                 return {**format_exec_error(e), "stdout": xml_safe(output_buffer.getvalue())}
 
         res = dispatch_to_gui(task, timeout=self.EXECUTE_CODE_TIMEOUT)

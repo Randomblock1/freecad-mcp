@@ -157,3 +157,29 @@ def async_job_status(job_id: str | None = None) -> dict[str, Any]:
 def _add_runtime(job: dict[str, Any]) -> None:
     if job["status"] == "running":
         job["runtime_s"] = round(time.time() - job["started_at"], 1)
+
+
+def running_async_jobs() -> list[str]:
+    """Ids of async jobs still executing user code.
+
+    Async workers mutate documents from a daemon thread, outside the GUI-thread
+    dispatch queue that serializes everything else. Operations that open an undo
+    transaction and then abort it (dry-run execute_code, section screenshots)
+    would revert whatever such a worker committed in the meantime, so they check
+    this first and refuse rather than silently destroy the worker's changes.
+    """
+    with _async_jobs_lock:
+        return [j["job_id"] for j in _async_jobs.values() if j["status"] == "running"]
+
+
+def busy_with_async_jobs(operation: str) -> str | None:
+    """Error message if ``operation`` must not run right now, else None."""
+    busy = running_async_jobs()
+    if not busy:
+        return None
+    return (
+        f"Refusing to run {operation} while background job(s) {', '.join(busy)} "
+        "are still running: it rolls back document changes by aborting an undo "
+        "transaction, which would also discard whatever those jobs have written. "
+        "Poll get_async_status until they finish, then retry."
+    )

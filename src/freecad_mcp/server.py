@@ -368,7 +368,9 @@ def execute_code(
             back all document changes (created/edited/deleted objects and new
             documents). Use it to preview or validate a script without committing.
             Only document state rolls back — file writes (save/export) and
-            persisted namespace variables do not.
+            persisted namespace variables do not. Rejected while an
+            execute_code_async job is still running, since the rollback would
+            also discard that job's changes.
 
     Returns:
         A message indicating success or failure, the code's output, and
@@ -420,6 +422,7 @@ def execute_code_from_file(
         dry_run: When True, run the script and return its output/errors, then
             roll back all document changes — a safe way to test a generator
             script before committing. File writes and namespace vars persist.
+            Rejected while an execute_code_async job is still running.
 
     Returns:
         A message indicating success or failure, the code's output, and
@@ -520,7 +523,9 @@ def get_section_view(
 
     Temporarily cuts away the half of the model on the +normal side of the
     plane, screenshots the exposed cross-section, then rolls everything back —
-    the document is never actually modified.
+    the document is never actually modified. Rejected while an
+    execute_code_async job is still running, since the rollback would also
+    discard that job's changes.
 
     Args:
         doc_name: The document to section.

@@ -81,6 +81,7 @@ def test_export_document_reports_size_and_objects():
     )
     text = text_of(core.export_document_operation(fake, "Doc", "/tmp/out.step"))
     assert "4321" in text and "Box" in text
+    assert "['Box']" not in text  # object names, not a Python list repr
 
 
 def test_export_document_passes_deflection_and_surfaces_note():

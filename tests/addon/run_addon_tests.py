@@ -66,6 +66,7 @@ try:
     from rpc_server.document_query import query_object, query_objects  # noqa: E402
     from rpc_server.code_exec import (  # noqa: E402
         async_job_status,
+        busy_with_async_jobs,
         complete_async_job,
         exec_namespace,
         format_exec_error,
@@ -368,6 +369,22 @@ def t_async_registry_lifecycle():
     expect(job_id in unknown["known_job_ids"], f"known ids missing: {unknown}")
 
 
+def t_async_guard_blocks_rollback_operations():
+    # dry-run execute_code and section screenshots abort undo transactions on
+    # documents an async worker may be mutating, so they must refuse while any
+    # job is running rather than discard the worker's changes.
+    expect(busy_with_async_jobs("x") is None, "no jobs running, guard should allow")
+    job_id = start_async_job("import time; time.sleep(1)")
+    try:
+        blocked = busy_with_async_jobs("execute_code with dry_run")
+        expect(blocked is not None, "guard should block while a job runs")
+        expect(job_id in blocked, f"message should name the job: {blocked}")
+        expect("get_async_status" in blocked, f"message should say how to wait: {blocked}")
+    finally:
+        complete_async_job(job_id, None)
+    expect(busy_with_async_jobs("x") is None, "guard should allow once the job finishes")
+
+
 def t_format_system_exit_is_failure():
     # sys.exit() raises SystemExit (a BaseException, not Exception); the async
     # worker must treat it as a failure, not a clean finish.
@@ -414,6 +431,7 @@ check("code_exec: xml_safe strips control chars", t_xml_safe_strips_control_char
 check("code_exec: rollback reverts edits + new objects", t_rollback_reverts_edits_and_new_objects)
 check("code_exec: rollback closes new documents", t_rollback_closes_new_documents)
 check("code_exec: async registry lifecycle", t_async_registry_lifecycle)
+check("code_exec: async guard blocks rollback ops", t_async_guard_blocks_rollback_operations)
 
 
 # --------------------------------------------------------------------------
@@ -604,6 +622,30 @@ def t_printability_overhang_opt_in():
     doc.removeObject("Cantilever")
 
 
+def t_printability_non_canonical_build_direction():
+    # A non-canonical direction falls back to Z for BOTH the direction vector
+    # and the axis index. A substring test against "XYZ" would accept "XY" and
+    # measure the build-plate exclusion along X while pointing d at Z.
+    import Part
+
+    base = Part.makeBox(20, 20, 4)
+    slab = Part.makeBox(20, 20, 4, FreeCAD.Vector(0, 0, 10))
+    comp = doc.addObject("Part::Feature", "AxisFallback")
+    comp.Shape = Part.makeCompound([base, slab])
+    doc.recompute()
+    try:
+        as_z = check_printability(DOC, "AxisFallback", include_overhangs=True,
+                                  max_overhang_deg=45)["overhangs"]
+        odd = check_printability(DOC, "AxisFallback", include_overhangs=True,
+                                 max_overhang_deg=45, build_direction="XY")["overhangs"]
+        expect(odd["count"] == as_z["count"],
+               f"non-canonical direction should fall back to Z: {odd} vs {as_z}")
+        expect(odd["worst_angle_deg"] == as_z["worst_angle_deg"],
+               f"worst angle should match the Z fallback: {odd} vs {as_z}")
+    finally:
+        doc.removeObject("AxisFallback")
+
+
 def t_printability_unknown_object():
     res = check_printability(DOC, "Nope")
     expect(res["success"] is False and "Box" in res["error"], f"bad error: {res}")
@@ -614,6 +656,8 @@ check("geometry: section_shape removes half", t_section_shape_removes_half)
 check("geometry: printability hollow-box wall thickness", t_printability_hollow_box_wall_thickness)
 check("geometry: printability open shell not watertight", t_printability_open_shell_not_watertight)
 check("geometry: printability overhang opt-in", t_printability_overhang_opt_in)
+check("geometry: printability non-canonical build direction",
+      t_printability_non_canonical_build_direction)
 check("geometry: printability unknown object", t_printability_unknown_object)
 
 
