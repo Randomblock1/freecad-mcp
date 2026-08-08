@@ -37,6 +37,15 @@ def _get_view_size(view: Any) -> tuple[int, int]:
 DEFAULT_MAX_EDGE = 800
 
 
+def _scale_to_max_edge(width: int, height: int, max_edge: int) -> tuple[int, int]:
+    longest = max(width, height)
+    if longest <= max_edge:
+        return width, height
+    scale = max_edge / longest
+    # round() so the longest edge lands exactly on max_edge (int truncates short).
+    return max(1, round(width * scale)), max(1, round(height * scale))
+
+
 def _resolve_screenshot_size(
     view: Any,
     width: int | None,
@@ -44,11 +53,7 @@ def _resolve_screenshot_size(
 ) -> tuple[int, int]:
     view_width, view_height = _get_view_size(view)
     if width is None and height is None:
-        longest = max(view_width, view_height)
-        if longest > DEFAULT_MAX_EDGE:
-            scale = DEFAULT_MAX_EDGE / longest
-            return max(1, round(view_width * scale)), max(1, round(view_height * scale))
-        return view_width, view_height
+        return _scale_to_max_edge(view_width, view_height, DEFAULT_MAX_EDGE)
     resolved_width = view_width if width is None else max(1, int(width))
     resolved_height = view_height if height is None else max(1, int(height))
     return resolved_width, resolved_height

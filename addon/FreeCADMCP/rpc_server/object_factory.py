@@ -37,6 +37,7 @@ def _create_fem_mesh(doc: FreeCAD.Document, obj: Object) -> "FreeCAD.DocumentObj
 
     Accepts both the FreeCAD 0.x and 1.x property names (``Part``/``Shape``,
     ``ElementSize{Max,Min}``/``CharacteristicLength{Max,Min}``).
+    Returns the created mesh object.
     """
     from femmesh.gmshtools import GmshTools
 

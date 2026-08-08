@@ -75,7 +75,7 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
-    { name = "mcp", extras = ["cli"], specifier = ">=1.12.2" },
+    { name = "mcp", extras = ["cli"], specifier = ">=1.12.2,<3" },
     { name = "validators", specifier = ">=0.34.0" },
 ]
 
