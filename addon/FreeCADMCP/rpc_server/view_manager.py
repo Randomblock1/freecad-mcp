@@ -190,13 +190,11 @@ def save_section_screenshot(
     All changes (temporary cut objects, visibility toggles) are rolled back
     before returning, so the document is left exactly as it was.
     Returns True on success, or an error string.
-    """
-    from rpc_server.code_exec import busy_with_async_jobs
-    from rpc_server.geometry_tools import section_shape
 
-    busy = busy_with_async_jobs("a section screenshot")
-    if busy:
-        return busy
+    Aborts an undo transaction, so callers must hold code_exec.rollback_guard
+    for the duration or a concurrent async job's changes go with it.
+    """
+    from rpc_server.geometry_tools import section_shape
 
     try:
         doc = FreeCAD.getDocument(doc_name)

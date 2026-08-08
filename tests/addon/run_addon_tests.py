@@ -65,10 +65,11 @@ try:
     from rpc_server.property_mapper import Object  # noqa: E402
     from rpc_server.document_query import query_object, query_objects  # noqa: E402
     from rpc_server.code_exec import (  # noqa: E402
+        RollbackInProgress,
         async_job_status,
-        busy_with_async_jobs,
         complete_async_job,
         exec_namespace,
+        rollback_guard,
         format_exec_error,
         rollback_documents,
         start_async_job,
@@ -369,20 +370,55 @@ def t_async_registry_lifecycle():
     expect(job_id in unknown["known_job_ids"], f"known ids missing: {unknown}")
 
 
-def t_async_guard_blocks_rollback_operations():
+def t_rollback_guard_blocks_on_running_job():
     # dry-run execute_code and section screenshots abort undo transactions on
     # documents an async worker may be mutating, so they must refuse while any
     # job is running rather than discard the worker's changes.
-    expect(busy_with_async_jobs("x") is None, "no jobs running, guard should allow")
+    with rollback_guard("x") as busy:
+        expect(busy is None, "no jobs running, guard should allow")
     job_id = start_async_job("import time; time.sleep(1)")
     try:
-        blocked = busy_with_async_jobs("execute_code with dry_run")
-        expect(blocked is not None, "guard should block while a job runs")
-        expect(job_id in blocked, f"message should name the job: {blocked}")
-        expect("get_async_status" in blocked, f"message should say how to wait: {blocked}")
+        with rollback_guard("execute_code with dry_run") as blocked:
+            expect(blocked is not None, "guard should block while a job runs")
+            expect(job_id in blocked, f"message should name the job: {blocked}")
+            expect("get_async_status" in blocked, f"message should say how to wait: {blocked}")
     finally:
         complete_async_job(job_id, None)
-    expect(busy_with_async_jobs("x") is None, "guard should allow once the job finishes")
+    with rollback_guard("x") as busy:
+        expect(busy is None, "guard should allow once the job finishes")
+
+
+def t_rollback_guard_blocks_new_jobs():
+    # The other half of the guard: holding the reservation must stop a NEW job
+    # from being admitted, or it could start between the check and the
+    # transaction opening on the GUI thread and get rolled back underneath.
+    with rollback_guard("execute_code with dry_run") as busy:
+        expect(busy is None, "guard should be held")
+        try:
+            leaked = start_async_job("pass")
+        except RollbackInProgress as e:
+            expect("dry_run" in str(e), f"message should name the blocking op: {e}")
+            expect("Retry" in str(e), f"message should tell the caller to retry: {e}")
+        else:
+            complete_async_job(leaked, None)
+            raise AssertionError("job was admitted while the guard was held")
+    # Reservation released on exit, so jobs are admitted again.
+    job_id = start_async_job("pass")
+    complete_async_job(job_id, None)
+    expect(async_job_status(job_id)["status"] == "completed", "job should run after release")
+
+
+def t_rollback_guard_releases_on_error():
+    # A failing dry run must not strand the reservation and wedge every future
+    # async job for the rest of the session.
+    try:
+        with rollback_guard("execute_code with dry_run") as busy:
+            expect(busy is None, "guard should be held")
+            raise RuntimeError("boom")
+    except RuntimeError:
+        pass
+    job_id = start_async_job("pass")  # raises RollbackInProgress if still held
+    complete_async_job(job_id, None)
 
 
 def t_format_system_exit_is_failure():
@@ -431,7 +467,9 @@ check("code_exec: xml_safe strips control chars", t_xml_safe_strips_control_char
 check("code_exec: rollback reverts edits + new objects", t_rollback_reverts_edits_and_new_objects)
 check("code_exec: rollback closes new documents", t_rollback_closes_new_documents)
 check("code_exec: async registry lifecycle", t_async_registry_lifecycle)
-check("code_exec: async guard blocks rollback ops", t_async_guard_blocks_rollback_operations)
+check("code_exec: rollback guard blocks on running job", t_rollback_guard_blocks_on_running_job)
+check("code_exec: rollback guard blocks new jobs", t_rollback_guard_blocks_new_jobs)
+check("code_exec: rollback guard releases on error", t_rollback_guard_releases_on_error)
 
 
 # --------------------------------------------------------------------------
@@ -609,17 +647,21 @@ def t_printability_overhang_opt_in():
     import Part
 
     # Base on the plate + a floating slab whose underside is a real overhang.
-    base = Part.makeBox(20, 20, 4)
-    slab = Part.makeBox(20, 20, 4, FreeCAD.Vector(0, 0, 10))
-    comp = doc.addObject("Part::Feature", "Cantilever")
-    comp.Shape = Part.makeCompound([base, slab])
-    doc.recompute()
-    res = check_printability(DOC, "Cantilever", include_overhangs=True, max_overhang_deg=45)
-    expect("overhangs" in res, "overhangs should be present when include_overhangs=True")
-    oh = res["overhangs"]
-    expect(oh["count"] >= 1, f"expected at least one overhang face, got {oh}")
-    expect(oh["worst_angle_deg"] > 45, f"worst overhang should exceed 45deg: {oh}")
-    doc.removeObject("Cantilever")
+    comp = None
+    try:
+        base = Part.makeBox(20, 20, 4)
+        slab = Part.makeBox(20, 20, 4, FreeCAD.Vector(0, 0, 10))
+        comp = doc.addObject("Part::Feature", "Cantilever")
+        comp.Shape = Part.makeCompound([base, slab])
+        doc.recompute()
+        res = check_printability(DOC, comp.Name, include_overhangs=True, max_overhang_deg=45)
+        expect("overhangs" in res, "overhangs should be present when include_overhangs=True")
+        oh = res["overhangs"]
+        expect(oh["count"] >= 1, f"expected at least one overhang face, got {oh}")
+        expect(oh["worst_angle_deg"] > 45, f"worst overhang should exceed 45deg: {oh}")
+    finally:
+        if comp is not None:
+            doc.removeObject(comp.Name)
 
 
 def t_printability_non_canonical_build_direction():
@@ -628,22 +670,28 @@ def t_printability_non_canonical_build_direction():
     # measure the build-plate exclusion along X while pointing d at Z.
     import Part
 
-    base = Part.makeBox(20, 20, 4)
-    slab = Part.makeBox(20, 20, 4, FreeCAD.Vector(0, 0, 10))
-    comp = doc.addObject("Part::Feature", "AxisFallback")
-    comp.Shape = Part.makeCompound([base, slab])
-    doc.recompute()
+    # Setup inside the try: a failure in makeCompound/recompute would otherwise
+    # strand the object in the shared fixture doc and break unrelated checks.
+    # Remove by comp.Name, not the literal: FreeCAD deduplicates names, so a
+    # stale leftover would make this delete the wrong object.
+    comp = None
     try:
-        as_z = check_printability(DOC, "AxisFallback", include_overhangs=True,
+        base = Part.makeBox(20, 20, 4)
+        slab = Part.makeBox(20, 20, 4, FreeCAD.Vector(0, 0, 10))
+        comp = doc.addObject("Part::Feature", "AxisFallback")
+        comp.Shape = Part.makeCompound([base, slab])
+        doc.recompute()
+        as_z = check_printability(DOC, comp.Name, include_overhangs=True,
                                   max_overhang_deg=45)["overhangs"]
-        odd = check_printability(DOC, "AxisFallback", include_overhangs=True,
+        odd = check_printability(DOC, comp.Name, include_overhangs=True,
                                  max_overhang_deg=45, build_direction="XY")["overhangs"]
         expect(odd["count"] == as_z["count"],
                f"non-canonical direction should fall back to Z: {odd} vs {as_z}")
         expect(odd["worst_angle_deg"] == as_z["worst_angle_deg"],
                f"worst angle should match the Z fallback: {odd} vs {as_z}")
     finally:
-        doc.removeObject("AxisFallback")
+        if comp is not None:
+            doc.removeObject(comp.Name)
 
 
 def t_printability_unknown_object():

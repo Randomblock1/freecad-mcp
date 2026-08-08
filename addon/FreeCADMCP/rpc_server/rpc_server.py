@@ -12,12 +12,13 @@ from typing import Any
 from PySide import QtCore
 
 from rpc_server.code_exec import (
+    RollbackInProgress,
     async_job_status,
-    busy_with_async_jobs,
     complete_async_job,
     exec_namespace,
     format_exec_error,
     rollback_documents,
+    rollback_guard,
     start_async_job,
     xml_safe,
 )
@@ -152,7 +153,12 @@ class FreeCADRPC:
         def _clear_status():
             dispatch_to_gui(lambda: FreeCADGui.getMainWindow().statusBar().clearMessage())
 
-        job_id = start_async_job(code)
+        try:
+            job_id = start_async_job(code)
+        except RollbackInProgress as e:
+            # A dry run or section screenshot holds the rollback reservation;
+            # starting now would only get this job's work aborted underneath it.
+            return {"success": False, "error": str(e)}
 
         def worker() -> None:
             # NOTE: we do NOT redirect sys.stdout here. contextlib.redirect_stdout
@@ -204,50 +210,54 @@ class FreeCADRPC:
         the submitted code (line numbers refer to the submitted string), and
         whatever the code printed before dying.
         """
-        if dry_run:
-            busy = busy_with_async_jobs("execute_code with dry_run")
-            if busy:
-                return {"success": False, "error": busy}
+        # The reservation must span the dispatch, not just this check: the
+        # transaction opens on the GUI thread once the queue drains, which can
+        # be much later than the check on this thread.
+        with contextlib.ExitStack() as stack:
+            if dry_run:
+                busy = stack.enter_context(rollback_guard("execute_code with dry_run"))
+                if busy:
+                    return {"success": False, "error": busy}
 
-        output_buffer = io.StringIO()
+            output_buffer = io.StringIO()
 
-        def task():
-            try:
-                if dry_run:
-                    with rollback_documents():
+            def task():
+                try:
+                    if dry_run:
+                        with rollback_documents():
+                            with contextlib.redirect_stdout(output_buffer):
+                                exec(code, exec_namespace())
+                    else:
                         with contextlib.redirect_stdout(output_buffer):
                             exec(code, exec_namespace())
-                else:
-                    with contextlib.redirect_stdout(output_buffer):
-                        exec(code, exec_namespace())
-                return True
-            except BaseException as e:
-                # BaseException, not Exception: code calling sys.exit() raises
-                # SystemExit, which neither dispatch_to_gui's wrapper nor the GUI
-                # task loop catches — it would escape a Qt slot and leave this
-                # call hanging until EXECUTE_CODE_TIMEOUT with a bogus timeout
-                # error. Same reasoning as the async worker above.
-                return {**format_exec_error(e), "stdout": xml_safe(output_buffer.getvalue())}
+                    return True
+                except BaseException as e:
+                    # BaseException, not Exception: code calling sys.exit() raises
+                    # SystemExit, which neither dispatch_to_gui's wrapper nor the
+                    # GUI task loop catches — it would escape a Qt slot and leave
+                    # this call hanging until EXECUTE_CODE_TIMEOUT with a bogus
+                    # timeout error. Same reasoning as the async worker above.
+                    return {**format_exec_error(e), "stdout": xml_safe(output_buffer.getvalue())}
 
-        res = dispatch_to_gui(task, timeout=self.EXECUTE_CODE_TIMEOUT)
-        if _ok(res):
-            FreeCAD.Console.PrintMessage("Python code executed successfully.\n")
-            prefix = "Python code executed successfully"
-            if dry_run:
-                prefix += " (dry run — all document changes rolled back)"
-            return {
-                "success": True,
-                "dry_run": dry_run,
-                "message": prefix + ".\nOutput: " + xml_safe(output_buffer.getvalue()),
-            }
-        # Log the offending code (truncated) to make errors traceable
-        code_preview = code if len(code) <= 800 else code[:800] + "\n...(truncated)"
-        err_text = res.get("error") if isinstance(res, dict) else res
-        FreeCAD.Console.PrintError(
-            f"Error executing Python code: {err_text}\n"
-            f"--- code ---\n{code_preview}\n--- end ---\n"
-        )
-        return _err(res)
+            res = dispatch_to_gui(task, timeout=self.EXECUTE_CODE_TIMEOUT)
+            if _ok(res):
+                FreeCAD.Console.PrintMessage("Python code executed successfully.\n")
+                prefix = "Python code executed successfully"
+                if dry_run:
+                    prefix += " (dry run — all document changes rolled back)"
+                return {
+                    "success": True,
+                    "dry_run": dry_run,
+                    "message": prefix + ".\nOutput: " + xml_safe(output_buffer.getvalue()),
+                }
+            # Log the offending code (truncated) to make errors traceable
+            code_preview = code if len(code) <= 800 else code[:800] + "\n...(truncated)"
+            err_text = res.get("error") if isinstance(res, dict) else res
+            FreeCAD.Console.PrintError(
+                f"Error executing Python code: {err_text}\n"
+                f"--- code ---\n{code_preview}\n--- end ---\n"
+            )
+            return _err(res)
 
     def get_objects(self, doc_name, detail="summary"):
         return query_objects(doc_name, detail)
@@ -391,25 +401,35 @@ class FreeCADRPC:
         All temporary changes are rolled back before returning. Returns
         {"success": True, "image": <base64 png>} or {"success": False, "error": ...}.
         """
-        fd, tmp_path = tempfile.mkstemp(suffix=".png")
-        os.close(fd)
+        # Reserved here rather than inside save_section_screenshot so the
+        # reservation also covers the wait for the GUI queue to drain, which is
+        # where an async job would otherwise slip in.
+        with rollback_guard("a section screenshot") as busy:
+            if busy:
+                return {"success": False, "error": busy}
 
-        def task():
-            return save_section_screenshot(
-                tmp_path, doc_name, plane, offset, object_names, view_name, width, height
-            )
+            fd, tmp_path = tempfile.mkstemp(suffix=".png")
+            os.close(fd)
 
-        try:
-            # The temporary boolean cut can be slow on large models.
-            res = dispatch_to_gui(task, timeout=120)
-            if _ok(res):
-                with open(tmp_path, "rb") as f:
-                    return {"success": True, "image": base64.b64encode(f.read()).decode("utf-8")}
-            err = res.get("error", str(res)) if isinstance(res, dict) else str(res)
-            return {"success": False, "error": err}
-        finally:
-            if os.path.exists(tmp_path):
-                os.remove(tmp_path)
+            def task():
+                return save_section_screenshot(
+                    tmp_path, doc_name, plane, offset, object_names, view_name, width, height
+                )
+
+            try:
+                # The temporary boolean cut can be slow on large models.
+                res = dispatch_to_gui(task, timeout=120)
+                if _ok(res):
+                    with open(tmp_path, "rb") as f:
+                        return {
+                            "success": True,
+                            "image": base64.b64encode(f.read()).decode("utf-8"),
+                        }
+                err = res.get("error", str(res)) if isinstance(res, dict) else str(res)
+                return {"success": False, "error": err}
+            finally:
+                if os.path.exists(tmp_path):
+                    os.remove(tmp_path)
 
     def _create_document_gui(self, name):
         doc = FreeCAD.newDocument(name)

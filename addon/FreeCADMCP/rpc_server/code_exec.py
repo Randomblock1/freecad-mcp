@@ -99,10 +99,25 @@ _async_jobs: dict[str, dict[str, Any]] = {}
 _async_jobs_lock = threading.Lock()
 _MAX_ASYNC_JOBS = 50
 
+# Active rollback_guard reservations, token -> operation name. Guarded by
+# _async_jobs_lock so a reservation and job admission can never interleave.
+_rollback_holders: dict[str, str] = {}
+
+
+class RollbackInProgress(RuntimeError):
+    """An async job was refused because a rollback-sensitive operation is active."""
+
 
 def start_async_job(code: str) -> str:
     job_id = uuid.uuid4().hex[:12]
     with _async_jobs_lock:
+        if _rollback_holders:
+            raise RollbackInProgress(
+                "Refusing to start a background job while "
+                f"{', '.join(sorted(set(_rollback_holders.values())))} is in progress: "
+                "that operation rolls back document changes by aborting an undo "
+                "transaction, and would discard this job's work. Retry once it returns."
+            )
         if len(_async_jobs) >= _MAX_ASYNC_JOBS:
             finished = sorted(
                 (j for j in _async_jobs.values() if j["status"] != "running"),
@@ -160,26 +175,52 @@ def _add_runtime(job: dict[str, Any]) -> None:
 
 
 def running_async_jobs() -> list[str]:
-    """Ids of async jobs still executing user code.
-
-    Async workers mutate documents from a daemon thread, outside the GUI-thread
-    dispatch queue that serializes everything else. Operations that open an undo
-    transaction and then abort it (dry-run execute_code, section screenshots)
-    would revert whatever such a worker committed in the meantime, so they check
-    this first and refuse rather than silently destroy the worker's changes.
-    """
+    """Ids of async jobs still executing user code."""
     with _async_jobs_lock:
         return [j["job_id"] for j in _async_jobs.values() if j["status"] == "running"]
 
 
-def busy_with_async_jobs(operation: str) -> str | None:
-    """Error message if ``operation`` must not run right now, else None."""
-    busy = running_async_jobs()
-    if not busy:
-        return None
-    return (
-        f"Refusing to run {operation} while background job(s) {', '.join(busy)} "
-        "are still running: it rolls back document changes by aborting an undo "
-        "transaction, which would also discard whatever those jobs have written. "
-        "Poll get_async_status until they finish, then retry."
-    )
+@contextlib.contextmanager
+def rollback_guard(operation: str):
+    """Reserve the document tree for a rollback-sensitive ``operation``.
+
+    Yields None when the reservation is held and the caller may proceed, or an
+    error message when async jobs are already running and the caller must bail
+    out without touching the documents.
+
+    Async workers mutate documents from a daemon thread, outside the GUI-thread
+    dispatch queue that serializes everything else. Operations that open an undo
+    transaction and then abort it (dry-run execute_code, section screenshots)
+    would revert whatever such a worker committed in the meantime.
+
+    Checking for running jobs is not sufficient on its own: the check runs on
+    the RPC thread while the transaction only opens once dispatch_to_gui drains
+    the queue, and that queue stalls while the user holds a mouse button or has
+    a dialog open — so the gap is wide enough to lose a real race, not a
+    theoretical one. The check and the reservation are therefore taken together
+    under _async_jobs_lock, and start_async_job refuses while one is held.
+
+    This bounds admission of NEW jobs only. Code already executing inside a job,
+    or a thread that code spawned itself, cannot be held off: nothing can compel
+    arbitrary exec'd user code to acquire a lock.
+    """
+    token = None
+    error = None
+    with _async_jobs_lock:
+        busy = [j["job_id"] for j in _async_jobs.values() if j["status"] == "running"]
+        if busy:
+            error = (
+                f"Refusing to run {operation} while background job(s) {', '.join(busy)} "
+                "are still running: it rolls back document changes by aborting an undo "
+                "transaction, which would also discard whatever those jobs have written. "
+                "Poll get_async_status until they finish, then retry."
+            )
+        else:
+            token = uuid.uuid4().hex[:12]
+            _rollback_holders[token] = operation
+    try:
+        yield error
+    finally:
+        if token is not None:
+            with _async_jobs_lock:
+                _rollback_holders.pop(token, None)

@@ -314,6 +314,9 @@ def execute_code_async(ctx: Context, code: str) -> list[TextContent]:
 
     Returns:
         A message with the background job id to poll via get_async_status.
+        Rejected while a dry run or section screenshot is in progress, since
+        those roll back document changes and would discard the job's work;
+        retry once they return.
     """
     return execute_code_async_operation(get_freecad_connection(), code)
 
