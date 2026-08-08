@@ -38,7 +38,9 @@ FreeCAD Addon directory is
   * Ubuntu: `~/.FreeCAD/Mod/` or `~/snap/freecad/common/Mod/` (if you install FreeCAD from snap)
   * Debian: `~/.local/share/FreeCAD/Mod`
   * Arch / CachyOS (FreeCAD 1.1 from `extra/freecad`): `~/.local/share/FreeCAD/v1-1/Mod/`
-  * Flatpak: `~/.var/app/org.freecad.FreeCAD/data/FreeCAD/Mod/`
+  * Flatpak:
+    * FreeCAD 1.1: `~/.var/app/org.freecad.FreeCAD/data/FreeCAD/v1-1/Mod/`
+    * FreeCAD 1.0: `~/.var/app/org.freecad.FreeCAD/data/FreeCAD/Mod/`
 
 Please put `addon/FreeCADMCP` directory to the addon directory.
 
@@ -57,7 +59,18 @@ cp -r addon/FreeCADMCP ~/.local/share/FreeCAD/v1-1/Mod/
 # For macOS (FreeCAD 1.1)
 mkdir -p ~/Library/Application\ Support/FreeCAD/v1-1/Mod/
 cp -r addon/FreeCADMCP ~/Library/Application\ Support/FreeCAD/v1-1/Mod/
+
+# For Linux (Flatpak, FreeCAD 1.1)
+mkdir -p ~/.var/app/org.freecad.FreeCAD/data/FreeCAD/v1-1/Mod/
+cp -r addon/FreeCADMCP ~/.var/app/org.freecad.FreeCAD/data/FreeCAD/v1-1/Mod/
 ```
+
+FreeCAD 1.1 moved the user data directory into a versioned `v1-1` subdirectory.
+An unversioned directory left over from FreeCAD 1.0 may still exist next to it;
+addons placed there are ignored by 1.1. If you are unsure which profile is
+active, check which `user.cfg` FreeCAD last wrote to (for Flatpak, compare
+`~/.var/app/org.freecad.FreeCAD/config/FreeCAD/user.cfg` against
+`~/.var/app/org.freecad.FreeCAD/config/FreeCAD/v1-1/user.cfg`).
 
 When you install addon, you need to restart FreeCAD.
 You can select "MCP Addon" from Workbench list and use it.
